@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from scipy import stats
 from scipy.signal import butter, filtfilt
+from numpy.fft import rfft, rfftfreq
 
 
 # 欄位索引定義 (0-based index)
@@ -128,6 +129,12 @@ def load_and_preprocess_subject(subject_id, folder_path='data_raw'):
         - 2026/03/07：
             1. 新增物理邊界清洗邏輯，剔除 Sitting (Label 2) 狀態下超過物理門檻的雜訊點。
             2. 修改 load_and_preprocess_subject 函式，整合重力特徵提取]。
+        - 2026/03/08：
+            1. 新增 Chest Acc X, Y, Z 計算重力分量。
+            2. 將重力分量合併入矩陣：[X, Y, Z, Mag, Grav_X, Grav_Y, Grav_Z, Label]。
+            3. 將標籤 (y) 放在最後一欄以符合 create_sliding_windows_with_indices 的邏輯。
+        - 2026/04/03：
+            1. 整合 FFT 頻譜特徵，解決 S2 靜態/動態混淆。
     """
     df = load_mhealth_subject(subject_id, folder_path) 
     if df is None: 
@@ -176,12 +183,25 @@ def load_and_preprocess_subject(subject_id, folder_path='data_raw'):
         feature_indices=[0, 1, 2, 3, 4, 5, 6],     # X, Y, Z, Mag, Grav_X, Grav_Y, Grav_Z
         label_index = 7
     )
-    return X_sub, y_sub
+
+    # --- 2026/04/03 新增：FFT 特徵廣播 ---
+    X_with_fft = []
+    for i in range(len(X_sub)):
+        window = X_sub[i]
+        # 計算該視窗的頻譜能量
+        fft_energy = extract_window_fft_energy(window)
+        # 建立一個全等的 (128, 1) 矩陣填充該能量值
+        fft_feature = np.full((window.shape[0], 1), fft_energy)
+        # 合併後變為 8 個特徵
+        new_window = np.hstack([window, fft_feature])
+        X_with_fft.append(new_window)
+
+    return np.array(X_with_fft), y_sub
 
 # ==========================================================================
 # 多位受試者處理管線
 # ==========================================================================
-def get_all_subjects_for_analysis(folder_path='data_raw'):
+def get_all_subjects_for_analysis(folder_path='data'):
     """
     診斷專用：回傳字典 {sid: (X, y)}。
     保留受試者獨立性，讓你能量化 Subject 1 vs Subject 4 的差異。
@@ -229,3 +249,20 @@ def apply_low_pass_filter(data, cutoff=0.3, fs=50, order=2):
     # 使用 filtfilt 替代 lfilter，消除時間延遲
     gravity = filtfilt(b, a, data, axis=0)
     return gravity
+
+# ==========================================================================
+# 新增頻譜能量計算函式
+# ==========================================================================
+def extract_window_fft_energy(window_data):
+    """
+    計算視窗內加速度量值 (Magnitude) 的頻譜能量
+    目的：區分 Sitting (低能量) 與 Waist Bends (高能量)
+    """
+    # 針對 Magnitude 欄位 (索引 3) 進行 FFT
+    sig = window_data[:, 3] 
+    # 執行實數 FFT
+    fft_vals = rfft(sig)
+    # 計算能量 (去除 DC 分量以集中觀察動作頻率)
+    energy = np.sum(np.abs(fft_vals[1:])**2) / len(sig)
+    return energy
+    

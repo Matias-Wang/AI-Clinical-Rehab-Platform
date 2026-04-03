@@ -1,5 +1,9 @@
+檔案說明.md
+.env
 .venv/
 __pycache__/
 *.pyc
-data_raw/
+data/
 development_history/
+CLAUDE.md
+GEMINI.md
