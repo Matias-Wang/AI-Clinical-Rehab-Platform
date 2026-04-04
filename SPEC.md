@@ -159,6 +159,14 @@ Input Shape: (128, 4)   ← Generation 2 之前；Generation 3 為 (128, 8)
 | `load_and_preprocess_subject(subject_id, folder_path)` | 單受試者完整預處理管線 | 受試者編號 | `(X, y)` ndarray，X shape: (n, 128, 8) |
 | `get_all_subjects_for_analysis(folder_path)` | 所有受試者獨立字典 | 資料夾路徑 | `{sid: (X, y)}` |
 | `get_final_training_data(folder_path)` | 合併所有受試者用於訓練 | 資料夾路徑 | `(X_final, y_final)` |
+| `align_coordinates(X)` | Rodrigues' 旋轉公式校正座標偏差（實驗性，已驗證在低訊噪比環境下效果反向） | ndarray (N, 128, 8) | ndarray |
+
+### `ClinicalQualityGate` 類別
+
+| 方法 | 用途 | 輸入 | 輸出 |
+|------|------|------|------|
+| `__init__(golden_template)` | 初始化，設定黃金標準範本（建議使用 S10） | ndarray (128, 8) | — |
+| `get_quality_report(X_window)` | 評估單視窗品質，回傳評分與通過/攔截判定 | ndarray (128, 8) | dict（含 score、passed、grav_y_var） |
 
 ---
 
@@ -185,6 +193,31 @@ Input Shape: (128, 4)   ← Generation 2 之前；Generation 3 為 (128, 8)
 - 最低容量受試者：S6、S7（約 500 個有效視窗）
 - 全體平均：約 530 個有效視窗（支持 10-Fold 公平交叉驗證）
 
+### 6.4 治療師集群效應診斷（2026/04/04）
+
+**現象**：受試者 S1–S4 在 Label 7（Frontal Elevation of Arms）的 `Grav_Y` 變異數極低（< 0.0003），疑因不同治療師引導或感測器配戴習慣，導致關鍵側向平面訊號缺失。
+
+| 群組 | 受試者 | Grav_Y 變異數（Label 7）| 特性 |
+|------|--------|------------------------|------|
+| 低活動組 | S1–S4 | < 0.0003 | 治療師集群效應，訊號缺失 |
+| 邊緣案例 | S7、S9 | 0.00066–0.00096 | 低活動但仍超過及格閾值 |
+| 黃金標準 | S10 | 0.001595 | 完整側向動作訊號 |
+
+**壓力測試結果（Cross-Group Validation）**：
+
+| 訓練集 | 測試集 | 準確率 |
+|--------|--------|--------|
+| S5–S10（高活動） | 全體 | 92% |
+| S5–S10（高活動） | S1–S4（低活動） | 68.89%（崩跌 -23.11%）|
+| 座標對齊後（Rodrigues'） | S1–S4 | 62.31%（反降 -6.58%）|
+
+> **結論**：在極低訊噪比（Grav_Y_Var < 0.0003）環境下，數學補償放大隨機噪音。後端演算法補償失效，確立採用「臨床品質閘門（Clinical Quality Gate）」的前端引導策略。
+
+### 6.5 Permutation Importance 分析（2026/04/04）
+
+- **FFT Energy** 在跨受試者預測中重要度 > 40%，為最關鍵特徵。
+- **Grav_Y** 在治療師集群效應情境下失效，導致低活動組準確率崩潰。
+
 ---
 
 ## 7. 環境與依賴 (Environment)
@@ -195,3 +228,42 @@ Input Shape: (128, 4)   ← Generation 2 之前；Generation 3 為 (128, 8)
 | 套件管理 | UV |
 | 主要依賴 | TensorFlow, NumPy, SciPy, Pandas, Matplotlib, Seaborn |
 | 依賴清單 | `requirements.txt` |
+
+---
+
+## 8. 臨床品質閘門規格 (Clinical Quality Gate Specification)
+
+> 確立於 2026/04/04，採 Data-Centric AI 路線，取代後端演算法補償。
+
+### 8.1 設計動機
+
+治療師集群效應（Therapist Clustering）導致 S1–S4 群組的 Label 7 動作 `Grav_Y` 變異數極低，使跨群組預測準確率從 92% 崩跌至 68.89%。座標對齊（Rodrigues' 旋轉）驗證失敗（準確率反降至 62.31%），確認後端補償策略在低訊噪比環境下無效。
+
+### 8.2 閾值定義
+
+| 閾值名稱 | 數值 | 依據 |
+|---------|------|------|
+| `GOLDEN_VAR_LIMIT`（黃金標準）| 0.001595 | S10 在 Label 7 的 Grav_Y 變異數實測值 |
+| `MIN_SAFE_LIMIT`（及格線） | 0.0005 | S7（0.00066）、S9（0.00096）邊緣案例診斷，確保 ≥ 90% 準確率；切開 S1–S4（< 0.0003）與 S5–S10（> 0.0006）兩群 |
+
+### 8.3 品質評分邏輯
+
+```python
+class ClinicalQualityGate:
+    GOLDEN_VAR_LIMIT = 0.001595  # S10 黃金標準
+    MIN_SAFE_LIMIT   = 0.0005    # 邊緣案例及格線
+
+    def get_quality_report(self, X_window):
+        var_grav_y = np.var(X_window[:, 5])  # 特徵索引 5 = Grav_Y
+        score = (var_grav_y / self.GOLDEN_VAR_LIMIT) * 100
+        passed = var_grav_y >= self.MIN_SAFE_LIMIT
+        return {"score": score, "passed": passed, "grav_y_var": var_grav_y}
+```
+
+- **通過（passed=True）**：`Grav_Y_Var ≥ 0.0005`，動作資料有效，可供模型推論。
+- **攔截（passed=False）**：`Grav_Y_Var < 0.0005`，輸出品質警示，應提示臨床人員重新引導病患動作或校正感測器配戴角度。
+
+### 8.4 臨床意義
+
+- 品質評分 < 30（如 S2 實測 20.9 分）：側向運動平面訊號嚴重缺失，模型推論結果不可信。
+- 此機制將「資料品質保障」前移至採集端，符合 Data-Centric AI 原則，避免以後端模型補償掩蓋前端採集缺陷。

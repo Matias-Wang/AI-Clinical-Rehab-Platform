@@ -66,7 +66,7 @@ data/
 
 ### 執行訓練（最新版本）
 
-開啟並執行 `20260403_Project_Rehab_FFT.ipynb`（Generation 3，混合域特徵版本）。
+開啟並執行 `20260404_Project_Rehab_Optimization.ipynb`（Generation 4，臨床品質控制版本）。
 
 ---
 
@@ -88,12 +88,14 @@ data/
 - **FFT 頻域特徵**：計算滑動視窗內的頻譜能量，區分靜止與動態動作。
 - **選擇性標準化**：前 4 維（Acc/Mag）執行受試者級別 Z-score；後 3 維（Gravity）執行全局縮放（÷10），保留物理角度參考值。
 - **LOSO 交叉驗證**：按受試者分割訓練/測試集，模擬臨床部署情境。
+- **臨床品質閘門 (Clinical Quality Gate)**：`ClinicalQualityGate` 類別，基於 Grav_Y 變異數閾值（≥ 0.0005）攔截低品質動作資料，防止治療師集群效應（Therapist Clustering）導致的偽陽性。採 Data-Centric AI 路線，取代後端數學補償策略。
 
 ### 實驗筆記本
 
 | 筆記本 | 對應世代 | 主要內容 |
 |--------|----------|---------|
-| `20260403_Project_Rehab_FFT.ipynb` | Generation 3 (Candidate) | 混合域特徵、FFT 頻譜、S2 修復 |
+| `20260404_Project_Rehab_Optimization.ipynb` | Generation 4 (Current) | 治療師集群效應診斷、壓力測試、座標對齊實驗、臨床品質閘門 |
+| `20260403_Project_Rehab_FFT.ipynb` | Generation 3 | 混合域特徵、FFT 頻譜、S2 修復 |
 | `development_history/20260307_Project_Rehab_Training_LOSO.ipynb` | Generation 2 | 重力特徵、LOSO 驗證 |
 | `development_history/20260228_Project_Rehab_Diagnostics.ipynb` | Generation 2 | 一致性檢定（KS Test）、物理稽核 |
 | `development_history/20260222_Project_Rehab_Consistency_Test.ipynb` | Generation 1 | 基礎一致性測試 |
@@ -104,8 +106,9 @@ data/
 
 ```
 AI-Clinical-Rehab-Platform/
-├── schema.py                          # 核心資料處理管線（特徵工程、濾波、視窗化）
-├── 20260403_Project_Rehab_FFT.ipynb   # 最新實驗：Generation 3 混合域特徵
+├── schema.py                              # 核心資料處理管線（特徵工程、濾波、視窗化、品質閘門）
+├── 20260404_Project_Rehab_Optimization.ipynb  # 最新實驗：Generation 4 臨床品質控制
+├── 20260403_Project_Rehab_FFT.ipynb       # Generation 3 混合域特徵
 ├── requirements.txt                   # 依賴套件清單
 │
 ├── data/                              # mHealth Dataset 原始資料

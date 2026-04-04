@@ -7,7 +7,8 @@
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                    研究實驗層 (Notebooks)                 │
-│   20260403_FFT.ipynb  │  development_history/*.ipynb     │
+│ 20260404_Optimization.ipynb │ 20260403_FFT.ipynb         │
+│              development_history/*.ipynb                 │
 └────────────────┬────────────────────────────────────────┘
                  │ 呼叫
 ┌────────────────▼────────────────────────────────────────┐
@@ -135,8 +136,9 @@ Input: (128, 8)
 | 世代 | 輸入維度 | 核心技術 | 主要問題 | 狀態 |
 |------|---------|---------|---------|------|
 | Generation 1 | (128, 4) | Acc + Magnitude | S2 坐姿誤判（Recall 2%） | 已退役 |
-| Generation 2 | (128, 7) | + Gravity 向量 | 靜態/動態角度重疊悖論 | 過渡期 |
-| Generation 3 | (128, 8) | + FFT 頻譜能量 | S2 修復（Recall 98%） | **當前候選版本** |
+| Generation 2 | (128, 7) | + Gravity 向量 | 靜態/動態角度重疊悖論 | 已退役 |
+| Generation 3 | (128, 8) | + FFT 頻譜能量 | 治療師集群效應（跨群組崩跌至 68.89%） | 前置基礎 |
+| Generation 4 | (128, 8) | + ClinicalQualityGate | Data-Centric 前端品質控制 | **當前版本** |
 
 ---
 
@@ -183,8 +185,9 @@ Input: (128, 8)
 ```
 AI-Clinical-Rehab-Platform/
 │
-├── schema.py                        # [核心] 資料處理管線
-├── 20260403_Project_Rehab_FFT.ipynb # [主實驗] Generation 3
+├── schema.py                                    # [核心] 資料處理管線（含 ClinicalQualityGate）
+├── 20260404_Project_Rehab_Optimization.ipynb    # [主實驗] Generation 4 臨床品質閘門
+├── 20260403_Project_Rehab_FFT.ipynb             # Generation 3 混合域特徵
 ├── requirements.txt                 # 依賴清單
 │
 ├── data/                            # 原始資料
@@ -226,11 +229,13 @@ AI-Clinical-Rehab-Platform/
 
 ## 9. 未來架構演進
 
-### 近期（Generation 4 候選）
+### 近期（Generation 4，已實作）
 
-- **Transformer Self-Attention**：取代 Conv1D 以捕捉長距離時序依賴關係。
-- **Wavelet Transform**：評估小波轉換與 FFT 的互補性。
-- **Per-subject Normalization**：針對 S1/S10 的 15% 分佈偏移問題引入個體化預處理。
+- **ClinicalQualityGate**：基於 Grav_Y 變異數閾值（MIN_SAFE_LIMIT = 0.0005）的前端品質閘門，攔截治療師集群效應導致的低品質資料。採 Data-Centric AI 路線。
+- **已驗證失敗**：Rodrigues' 旋轉座標對齊（後端補償），在低訊噪比環境反降準確率（68.89% → 62.31%），已放棄。
+- **下一步評估**：分群模型（Clustering-based Models），先以無監督學習判斷病患動作平面偏好，再切換最適微調模型。
+
+### 中期（產品化）
 
 ### 中期（產品化）
 
