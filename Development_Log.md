@@ -96,10 +96,25 @@
 
 
 ## 2026/04/03 實驗紀錄：特徵工程 
-
 * **混合域特徵 (8-D Input)**:
     * `Time-Domain`: X, Y, Z, Mag, Gravity_X/Y/Z (時域物理量)。
     * `Frequency-Domain`: FFT Spectral Energy (頻譜總能量)。
 * **頻域處理邏輯**: 
     * 使用 `rfft` 計算 Mag 欄位能量。
     * 執行 `log1p(x) / 5.0` 縮放，解決能量值跨度過大導致的梯度問題。
+
+##  2026/04/03  研發歷程紀錄：從演算法補償轉向臨床品質控制
+### 1. 核心問題識別 (Problem Identification)
+- 現象紀錄：發現受試者數據存在明顯的「治療師集群效應（Therapist Clustering）」。
+- 數據特徵：S1-S4 群組在標籤 7（側向動作）的 $Grav\_Y$ 變異數極低（< 0.0003），疑似因不同治療師引導或感測器配戴習慣，導致關鍵運動平面訊號缺失。
+    
+### 2. 實驗與驗證 (Experiments & Validation)
+- 壓力測試 (Stress Test)：執行跨群組交叉驗證。結果：當模型只看過高活動數據（S5-S10）去預測低活動數據（S1-S4）時，準確率從 92% 崩跌至 68.89%。
+- 座標對齊實驗 (Coordinate Alignment)：實作 Rodrigues' 旋轉公式試圖物理性校正佩戴偏差。失敗分析：對齊後測試 B 準確率反而下降至 62.31% (-6.58%)。結論：在極低訊噪比環境下，數學補償會放大隨機噪音，證實「後端補償」不如「前端引導」。
+
+### 3. 技術決策與實作 (Technical Decision)
+- 策略轉向：確立 Data-Centric AI 路線，放棄黑箱補償，改採「臨床品質閘門（Clinical Quality Gate）」。
+- 物理標竿設定：
+    - 黃金標準 (Gold Standard)：S10 ($Grav\_Y\_Var = 0.001595$)。
+    - 及格閾值 (Min Safe Threshold)：0.0005 (基於 S7/S9 邊緣案例診斷，確保 90%+ 準確率)。
+- 模組化封裝：完成 ClinicalQualityGate 類別，成功攔截 Subject 2 的無效動作（品質評分：20.9 分），解決了全量數據導致的偽陽性 Bug。

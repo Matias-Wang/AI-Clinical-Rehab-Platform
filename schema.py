@@ -266,3 +266,60 @@ def extract_window_fft_energy(window_data):
     energy = np.sum(np.abs(fft_vals[1:])**2) / len(sig)
     return energy
     
+# ==========================================================================
+# 新增頻譜能量計算函式
+# ==========================================================================
+def align_coordinates(X_batch):
+    """
+    將受試者的感測器座標系對齊至全局重力參考系 (Z-axis)
+    X_batch shape: (N_windows, 128, 8)
+    """
+    # 1. 提取重力分量 (4, 5, 6 欄)
+    gravity_data = X_batch[:, :, 4:6+1] # 取得 Grav_X, Grav_Y, Grav_Z
+    
+    # 2. 計算平均重力方向 (代表受試者的物理基準位姿)
+    avg_gravity = np.mean(gravity_data, axis=(0, 1))
+    norm = np.linalg.norm(avg_gravity)
+    if norm == 0: 
+        return X_batch # 避免除以零
+    v1 = avg_gravity / norm  # 受試者原始重力向量
+    
+    # 3. 定義目標向量 (理想的垂直向下，假設為 [0, 0, 1])
+    v2 = np.array([0, 0, 1])
+    
+    # 4. 計算旋轉矩陣 (Rodrigues' Rotation Matrix)
+    # 透過外積求旋轉軸，內積求角度
+    cross_v = np.cross(v1, v2)
+    dot_v = np.dot(v1, v2)
+    s = np.linalg.norm(cross_v)
+    
+    if s < 1e-6: # 若已經對齊，直接回傳
+        return X_batch
+    
+    # 偏對稱矩陣 (Skew-symmetric matrix)
+    vx = np.array(
+        [[0, -cross_v[2], cross_v[1]],
+        [cross_v[2], 0, -cross_v[0]],
+        [-cross_v[1], cross_v[0], 0]]
+    )
+    
+    # 旋轉矩陣公式: R = I + vx + vx^2 * ((1 - c) / s^2)
+    I = np.eye(3)
+    R = I + vx + np.matmul(vx, vx) * ((1 - dot_v) / (s**2))
+    
+    # 5. 應用旋轉矩陣到 Acc (0,1,2) 與 Grav (4,5,6)
+    X_aligned = X_batch.copy()
+    
+    # 針對每個時間步執行矩陣乘法
+    # 為了效能，我們將 (N*128, 3) 進行一次性旋轉
+    N, T, F = X_batch.shape
+    
+    # 校準加速度
+    acc_flat = X_aligned[:, :, 0:3].reshape(-1, 3)
+    X_aligned[:, :, 0:3] = np.dot(acc_flat, R.T).reshape(N, T, 3)
+    
+    # 校準重力分量
+    grav_flat = X_aligned[:, :, 4:7].reshape(-1, 3)
+    X_aligned[:, :, 4:7] = np.dot(grav_flat, R.T).reshape(N, T, 3)
+    
+    return X_aligned
