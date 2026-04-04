@@ -31,9 +31,10 @@
 | 數值計算 | NumPy、SciPy |
 | 資料處理 | Pandas |
 | 視覺化 | Matplotlib、Seaborn |
-| 模型類型 | LiteCNN (Conv1D) |
-| 特徵空間 | 8 維混合域（時域 7D + FFT 頻域 1D） |
-| 驗證協議 | LOSO 交叉驗證、Stratified Train/Test Split |
+| 模型類型 | **CNN-LSTM 混合架構**（Generation 3） |
+| 特徵空間 | **8 維混合域**（時域 7D + FFT 頻域 1D） |
+| 標準化策略 | **三段式**：Acc Z-score + Gravity ÷10 + FFT log1p/5 |
+| 驗證協議 | **10-Fold LOSO** 交叉驗證（Mean Acc: 85.08%） |
 | 資料集 | mHealth Dataset（10 受試者 × 12 動作類別） |
 
 ---
