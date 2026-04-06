@@ -168,6 +168,22 @@ Input Shape: (128, 4)   ← Generation 2 之前；Generation 3 為 (128, 8)
 | `__init__(golden_template)` | 初始化，設定黃金標準範本（建議使用 S10） | ndarray (128, 8) | — |
 | `get_quality_report(X_window)` | 評估單視窗品質，回傳評分與通過/攔截判定 | ndarray (128, 8) | dict（含 score、passed、grav_y_var） |
 
+### `RealTimeStreamProcessor` 類別（Stage 5 新增）
+
+| 方法 | 用途 | 輸入 | 輸出 |
+|------|------|------|------|
+| `__init__(window_size, stride)` | 初始化滑動視窗緩衝區（預設 window=128, stride=64，即 50% 重疊） | int, int | — |
+| `add_sample(sample)` | 新增單筆感測器原始樣本至緩衝區 | ndarray (8,) | — |
+| `get_window()` | 當緩衝區滿足視窗大小時，回傳當前視窗並依 stride 滑動 | — | ndarray (128, 8) 或 None |
+
+### `RealTimeBiofeedbackEngine` 類別（Stage 5 新增）
+
+| 方法 | 用途 | 輸入 | 輸出 |
+|------|------|------|------|
+| `__init__(model_path, golden_template)` | 載入 Keras 模型，初始化品質閘門與黃金範本 | str, ndarray (128, 8) | — |
+| `process_window(X_window)` | 對單視窗執行品質評估、AI 推論、相似度評分，回傳完整決策結果 | ndarray (128, 8) | dict（含 status、final_score、quality_score、similarity_score、prediction） |
+| `calculate_similarity(X_window)` | 計算與黃金範本的姿勢相似度評分（當前實作：歐幾里德距離；Stage 6 計畫替換為 DTW） | ndarray (128, 8) | float（0–100） |
+
 ---
 
 ## 6. 受試者診斷資訊 (Subject-level Diagnostics)
@@ -267,3 +283,20 @@ class ClinicalQualityGate:
 
 - 品質評分 < 30（如 S2 實測 20.9 分）：側向運動平面訊號嚴重缺失，模型推論結果不可信。
 - 此機制將「資料品質保障」前移至採集端，符合 Data-Centric AI 原則，避免以後端模型補償掩蓋前端採集缺陷。
+
+### 8.5 姿態相似度規格 (Posture Similarity Specification)
+演算法：歐幾里德距離映射（Euclidean Mapping）。
+特徵軸向：主要針對 Grav_Y (Index 5) 進行殘差計算。
+評分公式：$Score_{sim} = \max(0, 100 - Distance \times 15)$。
+綜合評分權重：$Final\_Score = (Score_{quality} \times 0.4) + (Score_{sim} \times 0.6)$。
+
+> Stage 6 計畫：將歐幾里德距離替換為 **Dynamic Time Warping (DTW)**，解決對動作節奏（相位）過於敏感的問題。
+
+### 8.6 UI 顏色狀態機與臨床引導邏輯系統
+根據即時運算結果，將數值轉化為視覺回饋：
+
+| 狀態 (Status) | 觸發條件 | UI 顏色 | 臨床提示訊息 |
+| ---- | ---- | ---- | ---- |
+| HALT | $Grav\_Y\_Var < 0.0005$ | 🔴 紅色 | ⚠️ 動作幅度嚴重不足，AI 停止預測。 |
+| PROCEED | $Score_{sim} \le 80$ | 🟡 黃色 | ⚠️ 姿勢與標準範本有偏移，請修正。 |
+| PROCEED | $Score_{sim} > 80$ | 🟢 綠色 | ✅ 動作標準，請保持！ |

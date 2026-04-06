@@ -157,6 +157,7 @@ def load_and_preprocess_subject(subject_id, folder_path='data_raw'):
     # 提取 Chest Acc X, Y, Z 計算重力分量
     acc_raw = df_with_feat.iloc[:, :3].values
     gravity_values = apply_low_pass_filter(acc_raw) 
+    gravity_values = gravity_values / 10.0
 
     # 將重力分量合併入矩陣：[X, Y, Z, Mag, Grav_X, Grav_Y, Grav_Z, Label]
     # 將標籤 (y) 放在最後一欄以符合 create_sliding_windows_with_indices 的邏輯
@@ -323,3 +324,119 @@ def align_coordinates(X_batch):
     X_aligned[:, :, 4:7] = np.dot(grav_flat, R.T).reshape(N, T, 3)
     
     return X_aligned
+
+
+# ==========================================================================
+# 臨床品質檢驗
+# ==========================================================================
+
+import numpy as np
+from collections import deque
+
+# --- Week 4: 臨床品質閘門 (Generation 4) ---
+class ClinicalQualityGate:
+    def __init__(self, golden_template):
+        self.GOLDEN_VAR_LIMIT = 0.001595  # S10 標竿
+        self.MIN_SAFE_LIMIT = 0.0005     # 邊緣案例 (S7/S9) 及格線
+        self.template = golden_template
+        
+    def get_quality_report(self, X_window):
+        """
+        針對單一或多個 128 步視窗進行品質診斷
+        """
+        # 修正維度處理，確保針對視窗內的 Y 軸變異數進行計算
+        if X_window.ndim == 3:
+            var_y = np.mean(np.var(X_window[:, :, 5], axis=1))
+        else:
+            var_y = np.var(X_window[:, 5])
+        
+        if var_y < self.MIN_SAFE_LIMIT:
+            score = (var_y / self.MIN_SAFE_LIMIT) * 60
+            return False, score, "⚠️ 動作幅度嚴重不足，AI 停止預測。"
+        
+        score = min(100, (var_y / self.GOLDEN_VAR_LIMIT) * 100)
+        return True, score, "✅ 數據品質良好，正在辨識中。"
+
+
+# ==========================================================================
+# 即時數據處理
+# ==========================================================================
+class RealTimeStreamProcessor:
+    def __init__(self, window_size=128, stride=64):
+        self.window_size = window_size
+        self.stride = stride
+        self.buffer = deque(maxlen=window_size)
+        self.new_data_counter = 0
+
+    def push_data(self, sensor_row):
+        """
+        將單一時間步的感測器數據推入緩衝區
+        """
+        self.buffer.append(sensor_row)
+        self.new_data_counter += 1
+        
+        # 達到步長且緩衝區已滿，回傳視窗數據進行分析
+        if self.new_data_counter >= self.stride and len(self.buffer) == self.window_size:
+            self.new_data_counter = 0
+            return True, np.array(self.buffer)
+        return False, None
+
+class RealTimeBiofeedbackEngine(RealTimeStreamProcessor):
+    def __init__(self, quality_gate, golden_template, model, window_size=128, stride=64):
+        super().__init__(window_size, stride)
+        self.gate = quality_gate
+        self.golden_template = golden_template
+        self.model = model
+
+    def calculate_similarity(self, current_window):
+        """
+        [物理特徵比對] 依照 SPEC 8.5 節實作相似度映射
+        """
+        current_y = current_window[:, 5] # Grav_Y
+        golden_y = self.golden_template[:, 5]
+        
+        distance = np.linalg.norm(current_y - golden_y)
+        
+        # 評分公式：$Score_{sim} = \max(0, 100 - Distance \times 15)$
+        # (這裡微調係數為 15 以提升實時顯示的寬容度)
+        sim_score = max(0, 100 - (distance * 15)) 
+        return sim_score
+
+    def process_live_frame(self, new_frame):
+        ready, window_data = self.push_data(new_frame)
+        if not ready: return None
+            
+        # 1. 執行 Week 4 品質檢查
+        is_valid, q_score, q_msg = self.gate.get_quality_report(window_data)
+        
+        if not is_valid:
+            return {
+                "status": "HALT", 
+                "ui_color": "RED", 
+                "msg": q_msg, 
+                "score": q_score, 
+                "similarity": 0, 
+                "predict_label": None
+            }
+            
+        # 2. 執行 Week 3 (v3) 模型推論
+        input_data = np.expand_dims(window_data, axis=0) # 符合 (1, 128, 8)
+        prediction = self.model.predict(input_data, verbose=0)
+        predict_label = np.argmax(prediction)
+        
+        # 3. 相似度與綜合評分 (0.4 品質 + 0.6 姿勢)
+        sim_score = self.calculate_similarity(window_data)
+        final_score = (q_score * 0.4) + (sim_score * 0.6)
+        
+        # 4. UI 顏色狀態機
+        ui_color = "GREEN" if sim_score > 35 else "YELLOW"
+        msg = f"✅ AI 辨識：{ACTIVITY_LABELS.get(predict_label, 'Unknown')}" #
+        
+        return {
+            "status": "PROCEED", 
+            "ui_color": ui_color, 
+            "msg": msg, 
+            "score": final_score, 
+            "similarity": sim_score, 
+            "predict_label": predict_label
+        }

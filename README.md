@@ -31,7 +31,7 @@
 | 數值計算 | NumPy、SciPy |
 | 資料處理 | Pandas |
 | 視覺化 | Matplotlib、Seaborn |
-| 模型類型 | **CNN-LSTM 混合架構**（Generation 3） |
+| 模型類型 | **LiteCNN（CNN 架構）**（Generation 4） |
 | 特徵空間 | **8 維混合域**（時域 7D + FFT 頻域 1D） |
 | 標準化策略 | **三段式**：Acc Z-score + Gravity ÷10 + FFT log1p/5 |
 | 驗證協議 | **10-Fold LOSO** 交叉驗證（Mean Acc: 85.08%） |
@@ -64,9 +64,17 @@ data/
   mHealth_subject10.log
 ```
 
-### 執行訓練（最新版本）
+### 執行批量驗收測試（最新版本）
 
-開啟並執行 `20260404_Project_Rehab_Optimization.ipynb`（Generation 4，臨床品質控制版本）。
+```bash
+python main.py
+```
+
+`main.py` 為系統主入口，支援：
+- **單一受試者模擬會期**：測試單一受試者即時推論流程
+- **S1–S10 批量自動化測試**：驗收全量受試者數據
+
+> 歷史實驗訓練ipynb檔存放於 `development_history/`。
 
 ---
 
@@ -89,6 +97,8 @@ data/
 - **選擇性標準化**：前 4 維（Acc/Mag）執行受試者級別 Z-score；後 3 維（Gravity）執行全局縮放（÷10），保留物理角度參考值。
 - **LOSO 交叉驗證**：按受試者分割訓練/測試集，模擬臨床部署情境。
 - **臨床品質閘門 (Clinical Quality Gate)**：`ClinicalQualityGate` 類別，基於 Grav_Y 變異數閾值（≥ 0.0005）攔截低品質動作資料，防止治療師集群效應（Therapist Clustering）導致的偽陽性。採 Data-Centric AI 路線，取代後端數學補償策略。
+- **即時串流處理器 (RealTimeStreamProcessor)**：`schema.py` 內建支援 50% 重疊率（Stride=64）的滑動視窗緩衝區，模擬穿戴裝置即時數據流。
+- **即時生物回饋引擎 (RealTimeBiofeedbackEngine)**：整合品質閘門與歐幾里德相似度評分的即時決策中心，輸出 紅/黃/綠 三色 UI 引導狀態。
 
 ### 實驗筆記本
 
@@ -106,48 +116,47 @@ data/
 
 ```
 AI-Clinical-Rehab-Platform/
-├── schema.py                              # 核心資料處理管線（特徵工程、濾波、視窗化、品質閘門）
-├── 20260404_Project_Rehab_Optimization.ipynb  # 最新實驗：Generation 4 臨床品質控制
-├── 20260403_Project_Rehab_FFT.ipynb       # Generation 3 混合域特徵
-├── requirements.txt                   # 依賴套件清單
+├── schema.py                              # 核心管線（特徵工程、品質閘門、即時引擎）
+├── main.py                                # 系統主入口（單次/批量驗收測試）
+├── requirements.txt                       # 依賴套件清單
 │
-├── data/                              # mHealth Dataset 原始資料
+├── data/                                  # mHealth Dataset 原始資料
 │   ├── mHealth_subject1.log ~ subject10.log
-│   └── data_raw_Info.md               # 資料集說明文件
+│   └── data_raw_Info.md                   # 資料集說明文件
 │
-├── models/                            # 訓練完成的模型檔案
-│   └── clinical_rehab_model_v1.keras
+├── models/                                # 訓練完成的模型檔案
+│   └── clinical_rehab_model_v3.keras      # Generation 4 當前模型
 │
-├── architecture/                      # 架構圖與評估結果
-│   └── confusion_matrix/              # 混淆矩陣圖
+├── architecture/                          # 架構圖與評估結果
+│   └── confusion_matrix/                  # 混淆矩陣圖
 │       ├── confusion_matrix_v3_multi.png
 │       ├── confusion_matrix_v3_1_multi.png
 │       ├── S2_Confusion_Matrix_FFT_Acc.png
 │       └── S2_Confusion_Matrix_FFT_Acc_0.78.png
 │
-├── Spec/                              # 技術規格文件
+├── Spec/                                  # 技術規格文件
 │   └── v3_1_multi_Technical_Spec.md
 │
-├── docs/                              # 參考文獻（SaMD、AI 醫療法規）
+├── docs/                                  # 參考文獻（SaMD、AI 醫療法規）
 │
-├── development_history/               # 歷史實驗筆記本存檔
+├── development_history/                   # 歷史實驗筆記本存檔
 │   ├── 20260222_Project_Rehab_Consistency_Test.ipynb
 │   ├── 20260228_Project_Rehab_Diagnostics.ipynb
-│   └── 20260307_Project_Rehab_Training_LOSO.ipynb
+│   ├── 20260307_Project_Rehab_Training_LOSO.ipynb
+│   ├── 20260403_Project_Rehab_FFT.ipynb           # Generation 3 混合域特徵
+│   └── 20260404_Project_Rehab_Optimization.ipynb  # Generation 4 臨床品質閘門
 │
 ├── README.md
 ├── ARCHITECTURE.md
 ├── SPEC.md
 ├── CHANGELOG.md
-├── 檔案說明.md
-├── CLAUDE.md
-└── GEMINI.md
 ```
 
 ---
 
 ## 未來優化 (Future Work)
 
+- **Stage 6 — DTW 演算法優化（進行中）**：在 `RealTimeBiofeedbackEngine.calculate_similarity()` 引入 Dynamic Time Warping（DTW），解決歐幾里德距離對動作節奏過於敏感的問題，提升系統對「正確姿勢但節奏不同」動作的包容度。
 - **架構升級**：評估引入 Transformer (Self-Attention) 機制以處理長序列動作關聯。
 - **數據增強**：針對小樣本動作類別（如 Jump，< 50 筆）實作 Data Augmentation。
 - **產品化**：結合 AWS Cloud 架構與醫療法規 (SaMD)，設計自動化 MLOps 流程。

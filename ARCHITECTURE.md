@@ -2,17 +2,23 @@
 
 ## 1. 系統概覽
 
-本專案為一套**穿戴式感測器動作辨識研究平台**，採用模組化的 Notebook + 共用管線架構。核心設計原則是將可重用的資料處理邏輯集中於 `schema.py`，讓各實驗筆記本專注於模型訓練與評估，實現**關注點分離（Separation of Concerns）**。
+本專案為一套**穿戴式感測器動作辨識研究平台**，Week 5 完成從實驗環境（Jupyter Notebook）向生產環境（Python Scripts）的全面遷移，採用模組化的生產腳本 + 共用管線架構。核心設計原則是將可重用的資料處理邏輯集中於 `schema.py`，實現**關注點分離（Separation of Concerns）**。
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    研究實驗層 (Notebooks)                 │
-│ 20260404_Optimization.ipynb │ 20260403_FFT.ipynb         │
-│              development_history/*.ipynb                 │
+│               生產入口層 (main.py)                        │
+│  單次受試者模擬會期 │ S1–S10 批量自動化驗收              │
 └────────────────┬────────────────────────────────────────┘
                  │ 呼叫
 ┌────────────────▼────────────────────────────────────────┐
-│              核心管線層 (schema.py)                       │
+│              核心引擎層 (schema.py)                       │
+│  RealTimeStreamProcessor（滑動視窗緩衝）                  │
+│  RealTimeBiofeedbackEngine（品質閘門 + 相似度決策）        │
+│  ClinicalQualityGate（Grav_Y 變異數品質評估）             │
+└────────────────┬────────────────────────────────────────┘
+                 │ 讀取
+┌────────────────▼────────────────────────────────────────┐
+│              資料管線層 (schema.py)                       │
 │  資料讀取 → 清洗 → 特徵工程 → 視窗化 → 輸出 (X, y)       │
 └────────────────┬────────────────────────────────────────┘
                  │ 讀取
@@ -22,20 +28,27 @@
 └─────────────────────────────────────────────────────────┘
 ```
 
+> 歷史研究實驗（Notebooks）存放於 `development_history/`，已退出主要開發流程。
+
 ---
 
 ## 2. 模組依賴關係
 
 ```
 schema.py
-├── os, pandas, numpy          # 基礎數值計算
-├── scipy.stats                # mode()：視窗標籤多數投票
-├── scipy.signal (butter, filtfilt)  # 重力向量低通濾波
-└── numpy.fft (rfft)           # FFT 頻譜能量計算
+├── os, pandas, numpy               # 基礎數值計算
+├── scipy.stats                     # mode()：視窗標籤多數投票
+├── scipy.signal (butter, filtfilt) # 重力向量低通濾波
+├── numpy.fft (rfft)                # FFT 頻譜能量計算
+└── tensorflow.keras                # 模型載入與推論
 
-Notebooks
-├── schema.py                  # 共用資料管線
-└── tensorflow.keras           # 模型定義、訓練、評估
+main.py
+├── schema.py                       # 核心管線 + 即時引擎
+└── （無額外依賴）
+
+development_history/*.ipynb（歷史實驗）
+├── schema.py                       # 共用資料管線
+└── tensorflow.keras                # 模型定義、訓練、評估
 ```
 
 ---
@@ -138,7 +151,8 @@ Input: (128, 8)
 | Generation 1 | (128, 4) | Acc + Magnitude | S2 坐姿誤判（Recall 2%） | 已退役 |
 | Generation 2 | (128, 7) | + Gravity 向量 | 靜態/動態角度重疊悖論 | 已退役 |
 | Generation 3 | (128, 8) | + FFT 頻譜能量 | 治療師集群效應（跨群組崩跌至 68.89%） | 前置基礎 |
-| Generation 4 | (128, 8) | + ClinicalQualityGate | Data-Centric 前端品質控制 | **當前版本** |
+| Generation 4 | (128, 8) | + ClinicalQualityGate | Data-Centric 前端品質控制 | 實驗完成 |
+| Week 5（產品化）| (128, 8) | + RealTimeStreamProcessor / RealTimeBiofeedbackEngine | Notebook → 生產腳本遷移，批量驗收管線建立 | **當前版本** |
 
 ---
 
@@ -185,57 +199,57 @@ Input: (128, 8)
 ```
 AI-Clinical-Rehab-Platform/
 │
-├── schema.py                                    # [核心] 資料處理管線（含 ClinicalQualityGate）
-├── 20260404_Project_Rehab_Optimization.ipynb    # [主實驗] Generation 4 臨床品質閘門
-├── 20260403_Project_Rehab_FFT.ipynb             # Generation 3 混合域特徵
-├── requirements.txt                 # 依賴清單
+├── schema.py                         # [核心] 資料管線 + 即時引擎（ClinicalQualityGate、RealTimeStreamProcessor、RealTimeBiofeedbackEngine）
+├── main.py                           # [入口] 批量驗收測試（S1–S10 自動化）
+├── requirements.txt                  # 依賴清單
 │
-├── data/                            # 原始資料
+├── data/                             # 原始資料
 │   ├── mHealth_subject1.log
 │   ├── ...
 │   ├── mHealth_subject10.log
-│   └── data_raw_Info.md             # 資料集規格說明
+│   └── data_raw_Info.md              # 資料集規格說明
 │
-├── models/                          # 已訓練模型存放
-│   └── clinical_rehab_model_v1.keras
+├── models/                           # 已訓練模型存放
+│   └── clinical_rehab_model_v3.keras # Generation 4 當前模型
 │
-├── architecture/                    # 架構圖與評估視覺化
+├── architecture/                     # 架構圖與評估視覺化
 │   └── confusion_matrix/
-│       ├── confusion_matrix_v3_multi.png       # Generation 2 混淆矩陣
-│       ├── confusion_matrix_v3_1_multi.png     # Generation 2.1 混淆矩陣
-│       ├── S2_Confusion_Matrix_FFT_Acc.png     # Generation 3 S2 混淆矩陣
+│       ├── confusion_matrix_v3_multi.png        # Generation 2 混淆矩陣
+│       ├── confusion_matrix_v3_1_multi.png      # Generation 2.1 混淆矩陣
+│       ├── S2_Confusion_Matrix_FFT_Acc.png      # Generation 3 S2 混淆矩陣
 │       └── S2_Confusion_Matrix_FFT_Acc_0.78.png
 │
-├── Spec/                            # 技術規格存檔
+├── Spec/                             # 技術規格存檔
 │   └── v3_1_multi_Technical_Spec.md
 │
-├── docs/                            # 參考文獻（醫療法規、SaMD）
+├── docs/                             # 參考文獻（醫療法規、SaMD）
 │
-├── development_history/             # 歷史實驗存檔
+├── development_history/              # 歷史實驗存檔
 │   ├── 20260222_Project_Rehab_Consistency_Test.ipynb
 │   ├── 20260228_Project_Rehab_Diagnostics.ipynb
-│   └── 20260307_Project_Rehab_Training_LOSO.ipynb
+│   ├── 20260307_Project_Rehab_Training_LOSO.ipynb
+│   ├── 20260403_Project_Rehab_FFT.ipynb              # Generation 3 混合域特徵
+│   └── 20260404_Project_Rehab_Optimization.ipynb     # Generation 4 臨床品質閘門
 │
-├── README.md                        # 專案門面與快速開始
-├── ARCHITECTURE.md                  # 系統架構（本文件）
-├── SPEC.md                          # 技術規格與實作準則
-├── CHANGELOG.md                     # 版本更新日誌
-├── 檔案說明.md                       # 專案文件結構說明
-├── CLAUDE.md                        # Claude AI 設定
-└── GEMINI.md                        # Gemini AI 設定
+├── README.md                         # 專案門面與快速開始
+├── ARCHITECTURE.md                   # 系統架構（本文件）
+├── SPEC.md                           # 技術規格與實作準則
+├── CHANGELOG.md                      # 版本更新日誌
 ```
 
 ---
 
 ## 9. 未來架構演進
 
-### 近期（Generation 4，已實作）
+### 已完成
 
+- **Week 5 產品化**：Notebook → 生產腳本全面遷移，建立 `RealTimeStreamProcessor`、`RealTimeBiofeedbackEngine`、批量自動化驗收管線（`main.py`）。
 - **ClinicalQualityGate**：基於 Grav_Y 變異數閾值（MIN_SAFE_LIMIT = 0.0005）的前端品質閘門，攔截治療師集群效應導致的低品質資料。採 Data-Centric AI 路線。
 - **已驗證失敗**：Rodrigues' 旋轉座標對齊（後端補償），在低訊噪比環境反降準確率（68.89% → 62.31%），已放棄。
-- **下一步評估**：分群模型（Clustering-based Models），先以無監督學習判斷病患動作平面偏好，再切換最適微調模型。
 
-### 中期（產品化）
+### 近期（Week 6，進行中）
+
+- **DTW 演算法優化**：在 `RealTimeBiofeedbackEngine.calculate_similarity()` 引入 Dynamic Time Warping（DTW），解決歐幾里德距離對動作節奏過於敏感的問題。目標：消除 S10 標竿受試者的非預期黃燈判定。
 
 ### 中期（產品化）
 
