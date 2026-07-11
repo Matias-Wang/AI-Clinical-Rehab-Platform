@@ -139,12 +139,6 @@ AI-Clinical-Rehab-Platform/
 │
 ├── docs/                                  # 參考文獻（SaMD、AI 醫療法規）
 │
-├── development_history/                   # 歷史實驗筆記本存檔
-│   ├── 20260222_Project_Rehab_Consistency_Test.ipynb
-│   ├── 20260228_Project_Rehab_Diagnostics.ipynb
-│   ├── 20260307_Project_Rehab_Training_LOSO.ipynb
-│   ├── 20260403_Project_Rehab_FFT.ipynb           # Generation 3 混合域特徵
-│   └── 20260404_Project_Rehab_Optimization.ipynb  # Generation 4 臨床品質閘門
 │
 ├── README.md
 ├── ARCHITECTURE.md
