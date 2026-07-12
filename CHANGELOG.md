@@ -4,6 +4,49 @@
 
 ---
 
+## [Fix 3] — 2026-07-12 — Acc/Mag Z-score 與 FFT 縮放修復（Train/Serving Skew）
+
+### Fixed
+- **`load_and_preprocess_subject()`**：補回 Week 5 產品化遷移時遺漏的受試者級 `StandardScaler` Z-score（僅針對 Acc_X/Y/Z/Magnitude），並確保順序正確——Z-score 排在 FFT 廣播之後，避免 FFT 能量被非原始尺度的 Magnitude 污染。
+- **`extract_window_fft_energy()`**：補回文件（SPEC.md §2.5）記載但程式碼裡缺失的 `log1p(x) / 5.0` 縮放。
+- 兩者皆為導致模型從未預測 Label 1/5/6/7、真實 Label 7 視窗 98% 誤判為 Label 10 的根本原因。修復後全受試者平均準確率 92.6%，個別受試者準確率（S02=0.8430、S07=0.9045、S09=0.9065、S10=0.9029）與訓練 notebook 記錄完全吻合。
+
+### Added
+- **`extract_golden_template(X, y, target_label=7)`**：新增於 `schema.py`，篩選指定標籤的第一個視窗作為黃金範本，取代 `main.py`／`ui_bridge.py` 原本直接取 `X[0]`（未必是 Label 7 動作）的作法。
+
+### Notes
+- 此修復不影響 `ClinicalQualityGate`（Grav_Y 變異數）與 Stage 6 的 DTW 相似度計算，兩者使用獨立的 Gravity 特徵路徑；Stage 5-7 的品質閘門驗收數字維持有效。
+- 已知限制：此 Z-score 為受試者級統計量，僅適用於目前「預先載入整個受試者、重播模擬即時串流」的架構；真正逐筆即時的硬體串流需另外設計線上標準化策略。
+
+---
+
+## [Stage 7] — 2026-07-11 — 即時資料橋接與展示前端
+
+### Added
+- **`ui_bridge.py`**：新增 WebSocket 即時資料橋接伺服器（`asyncio` + `websockets`），將 `RealTimeBiofeedbackEngine` 的即時推論結果（`ui_color`、`final_score`、`similarity` 等）broadcast 給所有已連線 client。重用 `schema.py` 既有的 `load_and_preprocess_subject`、`ClinicalQualityGate`、`RealTimeBiofeedbackEngine`、`ACTIVITY_LABELS`，不修改任何既有邏輯。支援 `--subject`／`--port`／`--speed`／`--realtime` CLI 參數。
+- **`frontend/demo.html`**：新增最小展示前端（自包含 HTML/JS，無框架），以瀏覽器原生 WebSocket API 連線，顯示紅/黃/綠燈號與即時評分，用於驗證後端到前端的串接管線。
+- **依賴**：`requirements.txt` 新增 `websockets`（保留原檔案 UTF-16 LE 編碼）。
+
+### Notes
+- 已驗證：伺服器啟動流程、單/雙 client 收發、broadcast 一致性、client 異常斷線時伺服器不崩潰、`python main.py` 既有驗收流程不受影響。
+- 3D 前端視覺化與 50Hz 真實速率長時間壓力測試留待後續 Stage。
+
+---
+
+## [Stage 6] — 2026-07-11 — DTW 相似度演算法
+
+### Added
+- **`dtw_distance()`**：在 `schema.py` 新增純 numpy 實作的 DTW（Dynamic Time Warping）距離函式，採 Sakoe-Chiba band 限制（`radius=16` samples ≈ 0.32 秒 @ 50Hz），local cost 為平方差、最終距離開根號，與原歐幾里德距離同尺度。
+
+### Changed
+- **`RealTimeBiofeedbackEngine.calculate_similarity()`**：改用 `dtw_distance()` 取代 `np.linalg.norm()`，容忍受試者動作節奏（相位）與 S10 黃金範本的差異，減少「姿勢正確但節奏不同」被誤判黃燈的情況。
+- **`RealTimeBiofeedbackEngine.__init__()`**：新增可調參數 `dtw_radius`（預設 16）。
+
+### Notes
+- 因對角線路徑恆為 DTW 搜尋空間中的合法解，DTW 距離恆 `≤` 對應的歐幾里德距離，故評分公式（`* 15` 係數）與 GREEN/YELLOW 門檻無需重新校準；`ClinicalQualityGate` 攔截邏輯未受影響。
+
+---
+
 ## [Generation 3] — 2026-04-03 — Candidate 版本
 
 ### Added

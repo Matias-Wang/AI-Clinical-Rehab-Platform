@@ -6,11 +6,11 @@
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│               生產入口層 (main.py)                        │
-│  單次受試者模擬會期 │ S1–S10 批量自動化驗收              │
-└────────────────┬────────────────────────────────────────┘
-                 │ 呼叫
-┌────────────────▼────────────────────────────────────────┐
+│     生產入口層 (main.py)  │  即時通信層 (ui_bridge.py)     │
+│  S1–S10 批量自動化驗收    │  WebSocket 推播 (frontend/)   │
+└────────────────┬───────────────────┬─────────────────────┘
+                 │ 呼叫               │ 呼叫
+┌────────────────▼───────────────────▼─────────────────────┐
 │              核心引擎層 (schema.py)                       │
 │  RealTimeStreamProcessor（滑動視窗緩衝）                  │
 │  RealTimeBiofeedbackEngine（品質閘門 + 相似度決策）        │
@@ -45,6 +45,15 @@ schema.py
 main.py
 ├── schema.py                       # 核心管線 + 即時引擎
 └── （無額外依賴）
+
+ui_bridge.py
+├── asyncio, json, argparse         # 標準庫（非同步事件迴圈、序列化、CLI）
+├── websockets                      # WebSocket 伺服器與 broadcast
+├── tensorflow.keras                # 模型載入
+└── schema.py                       # 核心管線 + 即時引擎
+
+frontend/demo.html
+└── 瀏覽器原生 WebSocket API（無框架、無 build tooling）
 
 development_history/*.ipynb（歷史實驗）
 ├── schema.py                       # 共用資料管線
@@ -152,7 +161,9 @@ Input: (128, 8)
 | Generation 2 | (128, 7) | + Gravity 向量 | 靜態/動態角度重疊悖論 | 已退役 |
 | Generation 3 | (128, 8) | + FFT 頻譜能量 | 治療師集群效應（跨群組崩跌至 68.89%） | 前置基礎 |
 | Generation 4 | (128, 8) | + ClinicalQualityGate | Data-Centric 前端品質控制 | 實驗完成 |
-| Week 5（產品化）| (128, 8) | + RealTimeStreamProcessor / RealTimeBiofeedbackEngine | Notebook → 生產腳本遷移，批量驗收管線建立 | **當前版本** |
+| Week 5（產品化）| (128, 8) | + RealTimeStreamProcessor / RealTimeBiofeedbackEngine | Notebook → 生產腳本遷移，批量驗收管線建立 | 已完成 |
+| Stage 6 | (128, 8) | + DTW 相似度演算法 | 動作節奏（相位）過度敏感 | 已完成 |
+| Stage 7 | (128, 8) | + ui_bridge.py（WebSocket）+ frontend/demo.html | 分析結果僅能終端機輸出，尚未對接前端 | **當前版本** |
 
 ---
 
@@ -201,7 +212,11 @@ AI-Clinical-Rehab-Platform/
 │
 ├── schema.py                         # [核心] 資料管線 + 即時引擎（ClinicalQualityGate、RealTimeStreamProcessor、RealTimeBiofeedbackEngine）
 ├── main.py                           # [入口] 批量驗收測試（S1–S10 自動化）
+├── ui_bridge.py                      # [Stage 7] WebSocket 即時資料橋接伺服器
 ├── requirements.txt                  # 依賴清單
+│
+├── frontend/                         # [Stage 7] 最小展示前端
+│   └── demo.html                     # 自包含 HTML/JS，透過 WebSocket 顯示即時燈號與評分
 │
 ├── data/                             # 原始資料
 │   ├── mHealth_subject1.log
@@ -247,9 +262,12 @@ AI-Clinical-Rehab-Platform/
 - **ClinicalQualityGate**：基於 Grav_Y 變異數閾值（MIN_SAFE_LIMIT = 0.0005）的前端品質閘門，攔截治療師集群效應導致的低品質資料。採 Data-Centric AI 路線。
 - **已驗證失敗**：Rodrigues' 旋轉座標對齊（後端補償），在低訊噪比環境反降準確率（68.89% → 62.31%），已放棄。
 
-### 近期（Week 6，進行中）
+- **Stage 6 — DTW 演算法優化**：`RealTimeBiofeedbackEngine.calculate_similarity()` 改用 Dynamic Time Warping（DTW，Sakoe-Chiba band）取代歐幾里德距離，解決動作節奏過於敏感的問題；因 DTW 距離恆 ≤ 原歐幾里德距離，評分公式與門檻無需重新校準。
+- **Stage 7 — 即時資料橋接**：新增 `ui_bridge.py`（WebSocket 伺服器）與 `frontend/demo.html`（最小展示前端），將 `RealTimeBiofeedbackEngine` 的即時決策結果（`ui_color`、`final_score` 等）推播給前端顯示，驗證後端到前端的串接管線。
 
-- **DTW 演算法優化**：在 `RealTimeBiofeedbackEngine.calculate_similarity()` 引入 Dynamic Time Warping（DTW），解決歐幾里德距離對動作節奏過於敏感的問題。目標：消除 S10 標竿受試者的非預期黃燈判定。
+### 近期（Stage 8，進行中）
+
+- **最終壓力測試與交付**：長時間循環運行全量受試者數據，測試 `RealTimeStreamProcessor` 緩衝區穩定性；補強例外與錯誤處理；整理正式部署文件。
 
 ### 中期（產品化）
 

@@ -72,6 +72,10 @@
 | 6 | Gravity_Z | 低通濾波 (0.3Hz Butterworth) | 全局縮放 ÷10.0 |
 | 7 | FFT_Energy | rfft(Magnitude)[1:] 能量，log1p(x)/5.0 縮放 | 每視窗計算後廣播 |
 
+> **實作備註**：受試者級 Z-score（欄位 0-3）與 FFT log1p/5.0 縮放（欄位 7）曾在 Week 5 產品化遷移時遺漏，於 2026-07-12 修復（見 ROADMAP.md Fix 3）。**順序要求**：FFT 能量必須用「原始尺度」的 Magnitude 計算，因此 Z-score 必須排在 FFT 廣播之後才能執行，順序顛倒會讓 FFT 特徵失真、模型準確率崩壞（實測：順序錯誤時整體準確率僅 ~5-48%，正確順序下為 ~90-97%）。
+>
+> **已知限制**：此 Z-score 為「受試者級」統計量，需要該受試者的完整視窗集合才能計算，適用於目前 `main.py`／`ui_bridge.py` 這種「預先載入整個受試者資料、再重播模擬即時串流」的架構。若未來串接真正的穿戴式硬體（逐筆即時進來、無法預知整個 session 的統計量），需要另外設計滾動統計量或線上標準化策略，不在本次修復範圍內。
+
 ### 2.3 物理邊界清洗規則
 
 ```
@@ -154,12 +158,14 @@ Input Shape: (128, 4)   ← Generation 2 之前；Generation 3 為 (128, 8)
 | `load_mhealth_subject(subject_id, folder_path)` | 讀取單一受試者 `.log` 原始檔 | 受試者編號、資料夾路徑 | `pd.DataFrame` |
 | `add_magnitude_feature(df)` | 計算並插入 Magnitude 欄位 | DataFrame | DataFrame（含 magnitude 欄） |
 | `apply_low_pass_filter(data, cutoff, fs, order)` | Butterworth 低通濾波分離重力 | ndarray | ndarray（gravity 分量） |
-| `extract_window_fft_energy(window_data)` | 計算單視窗 FFT 頻譜能量 | ndarray (128, n) | float |
+| `extract_window_fft_energy(window_data)` | 計算單視窗 FFT 頻譜能量（含 log1p/5.0 縮放） | ndarray (128, n) | float |
+| `dtw_distance(seq_a, seq_b, radius)` | 計算兩序列的 DTW 距離（Sakoe-Chiba band 限制版） | ndarray (n,), ndarray (m,), int | float |
 | `create_sliding_windows_with_indices(df, feature_indices, label_index, window_size, overlap)` | 視窗切割 | DataFrame、索引列表 | `(X, y)` ndarray |
-| `load_and_preprocess_subject(subject_id, folder_path)` | 單受試者完整預處理管線 | 受試者編號 | `(X, y)` ndarray，X shape: (n, 128, 8) |
+| `load_and_preprocess_subject(subject_id, folder_path)` | 單受試者完整預處理管線，含受試者級 Acc/Mag Z-score 標準化 | 受試者編號 | `(X, y)` ndarray，X shape: (n, 128, 8) |
 | `get_all_subjects_for_analysis(folder_path)` | 所有受試者獨立字典 | 資料夾路徑 | `{sid: (X, y)}` |
 | `get_final_training_data(folder_path)` | 合併所有受試者用於訓練 | 資料夾路徑 | `(X_final, y_final)` |
 | `align_coordinates(X)` | Rodrigues' 旋轉公式校正座標偏差（實驗性，已驗證在低訊噪比環境下效果反向） | ndarray (N, 128, 8) | ndarray |
+| `extract_golden_template(X, y, target_label)` | 從指定受試者資料中擷取第一個符合 target_label 的視窗作為黃金範本 | ndarray, ndarray, int | ndarray (128, 8) |
 
 ### `ClinicalQualityGate` 類別
 
@@ -182,7 +188,7 @@ Input Shape: (128, 4)   ← Generation 2 之前；Generation 3 為 (128, 8)
 |------|------|------|------|
 | `__init__(model_path, golden_template)` | 載入 Keras 模型，初始化品質閘門與黃金範本 | str, ndarray (128, 8) | — |
 | `process_window(X_window)` | 對單視窗執行品質評估、AI 推論、相似度評分，回傳完整決策結果 | ndarray (128, 8) | dict（含 status、final_score、quality_score、similarity_score、prediction） |
-| `calculate_similarity(X_window)` | 計算與黃金範本的姿勢相似度評分（當前實作：歐幾里德距離；Stage 6 計畫替換為 DTW） | ndarray (128, 8) | float（0–100） |
+| `calculate_similarity(X_window)` | 計算與黃金範本的姿勢相似度評分（Stage 6 起：DTW，Sakoe-Chiba band） | ndarray (128, 8) | float（0–100） |
 
 ---
 
@@ -285,12 +291,13 @@ class ClinicalQualityGate:
 - 此機制將「資料品質保障」前移至採集端，符合 Data-Centric AI 原則，避免以後端模型補償掩蓋前端採集缺陷。
 
 ### 8.5 姿態相似度規格 (Posture Similarity Specification)
-演算法：歐幾里德距離映射（Euclidean Mapping）。
-特徵軸向：主要針對 Grav_Y (Index 5) 進行殘差計算。
+演算法：**DTW（Dynamic Time Warping，Sakoe-Chiba band 限制版，radius=16 samples ≈ 0.32 秒 @ 50Hz）**（Stage 6 起，取代原歐幾里德距離映射）。
+特徵軸向：主要針對 Grav_Y (Index 5) 進行序列比對。
+距離定義：Local cost 採平方差 `(a_i - b_j)^2`，最終距離為 `sqrt(累積最小路徑成本)`，與原歐幾里德距離同尺度。因對角線路徑恆為合法解，DTW 距離恆 `≤` 對應的歐幾里德距離；節奏完全一致時兩者相等，節奏不同時 DTW 更寬容，故 `* 15` 係數與 GREEN/YELLOW 門檻無需重新校準。
 評分公式：$Score_{sim} = \max(0, 100 - Distance \times 15)$。
 綜合評分權重：$Final\_Score = (Score_{quality} \times 0.4) + (Score_{sim} \times 0.6)$。
 
-> Stage 6 計畫：將歐幾里德距離替換為 **Dynamic Time Warping (DTW)**，解決對動作節奏（相位）過於敏感的問題。
+> 實作：`dtw_distance(seq_a, seq_b, radius)`，位於 `schema.py`。
 
 ### 8.6 UI 顏色狀態機與臨床引導邏輯系統
 根據即時運算結果，將數值轉化為視覺回饋：
@@ -300,3 +307,66 @@ class ClinicalQualityGate:
 | HALT | $Grav\_Y\_Var < 0.0005$ | 🔴 紅色 | ⚠️ 動作幅度嚴重不足，AI 停止預測。 |
 | PROCEED | $Score_{sim} \le 80$ | 🟡 黃色 | ⚠️ 姿勢與標準範本有偏移，請修正。 |
 | PROCEED | $Score_{sim} > 80$ | 🟢 綠色 | ✅ 動作標準，請保持！ |
+
+---
+
+## 9. 即時資料橋接規格 (Realtime Bridge Specification)
+
+> 確立於 Stage 7，實作於 `ui_bridge.py`，展示前端 `frontend/demo.html`。
+
+### 9.1 設計動機
+
+`RealTimeBiofeedbackEngine` 的分析結果原本僅能在終端機文字輸出（`main.py`）。`ui_bridge.py` 提供一個獨立的 WebSocket 通信層，將每次 `process_live_frame()` 產生的非 `None` 結果即時推播給所有已連線的前端 client，不修改 `schema.py` 既有邏輯，純粹重用 `load_and_preprocess_subject`、`ClinicalQualityGate`、`RealTimeBiofeedbackEngine`、`ACTIVITY_LABELS`。
+
+### 9.2 資料來源
+
+沒有真實硬體輸入，改用指定受試者（預設 S10）的 mHealth log 檔案模擬即時串流：`load_and_preprocess_subject(subject_id, "data/")` 取得的視窗攤平為逐幀資料（`X.reshape(-1, 8)`），逐幀餵入 `engine.process_live_frame()`。播放到結尾後自動從頭重播。黃金範本固定取 S10（`load_and_preprocess_subject(10, ...)`），與 `--subject` 參數無關。
+
+### 9.3 連線與埠號
+
+- 協定：WebSocket（`ws://`）。
+- 預設埠：`8765`（可用 `--port` 覆寫）。
+- 一個伺服器行程對應一個受試者的模擬串流；所有已連線 client 收到相同的 broadcast。
+
+### 9.4 CLI 參數
+
+| 參數 | 說明 | 預設值 |
+|------|------|--------|
+| `--subject` | 模擬串流的受試者編號 | 10 |
+| `--port` | WebSocket 監聽埠 | 8765 |
+| `--speed` | 播放加速倍率（1.0 為真實 50Hz） | 20.0 |
+| `--realtime` | 等同 `--speed 1.0` | — |
+
+### 9.5 推播訊息格式 (JSON)
+
+每當 `process_live_frame()` 產生一筆結果，伺服器即以下列 JSON 格式透過 WebSocket 推播給所有已連線 client：
+
+```json
+{
+  "status": "PROCEED",
+  "ui_color": "GREEN",
+  "msg": "✅ AI 辨識：Walking",
+  "score": 62.29,
+  "similarity": 37.14,
+  "predict_label": 4,
+  "predict_label_name": "Walking",
+  "subject_id": 10,
+  "frame_index": 506
+}
+```
+
+| 欄位 | 型別 | 說明 |
+|------|------|------|
+| `status` | string | `"HALT"` 或 `"PROCEED"`，對應 `ClinicalQualityGate` 判定 |
+| `ui_color` | string | `"RED"` / `"YELLOW"` / `"GREEN"` |
+| `msg` | string | 臨床提示訊息（含 emoji） |
+| `score` | float | 綜合評分 Final Score |
+| `similarity` | float | 姿態相似度評分（DTW，見 8.5 節） |
+| `predict_label` | int \| null | 模型預測標籤（`HALT` 時為 `null`） |
+| `predict_label_name` | string \| null | 由 `ACTIVITY_LABELS` 查得的中文動作名稱 |
+| `subject_id` | int | 目前模擬串流的受試者編號 |
+| `frame_index` | int | 視窗序號，每次重播歸零 |
+
+### 9.6 錯誤處理
+
+單一 client 的連線例外（如非正常關閉、無 close frame）僅記錄該 client 並從連線集合移除，不影響伺服器與其他 client 的運作（見 `handle_client()`）。

@@ -4,6 +4,7 @@ import numpy as np
 from scipy import stats
 from scipy.signal import butter, filtfilt
 from numpy.fft import rfft, rfftfreq
+from sklearn.preprocessing import StandardScaler
 
 
 # 欄位索引定義 (0-based index)
@@ -186,6 +187,8 @@ def load_and_preprocess_subject(subject_id, folder_path='data_raw'):
     )
 
     # --- 2026/04/03 新增：FFT 特徵廣播 ---
+    # 注意：FFT 能量必須用「原始尺度」的 Magnitude 計算（與訓練時一致），
+    # 因此受試者級 Z-score 必須排在 FFT 廣播之後，不可提前。
     X_with_fft = []
     for i in range(len(X_sub)):
         window = X_sub[i]
@@ -197,7 +200,18 @@ def load_and_preprocess_subject(subject_id, folder_path='data_raw'):
         new_window = np.hstack([window, fft_feature])
         X_with_fft.append(new_window)
 
-    return np.array(X_with_fft), y_sub
+    X_with_fft = np.array(X_with_fft)
+
+    # --- 受試者級 Z-score：僅針對 Acc_X, Acc_Y, Acc_Z, Magnitude（前 4 欄）---
+    # 用該受試者全部視窗攤平後的 Acc/Mag 值 fit，消除個體強度差異；
+    # Gravity（4-6 欄）與 FFT_Energy（第 7 欄）維持原本縮放，不參與此標準化。
+    n_windows, n_steps, _ = X_with_fft.shape
+    acc_mag_part = X_with_fft[:, :, :4].reshape(-1, 4)
+    scaler = StandardScaler()
+    scaled_acc_mag = scaler.fit_transform(acc_mag_part).reshape(n_windows, n_steps, 4)
+    X_with_fft = np.concatenate([scaled_acc_mag, X_with_fft[:, :, 4:]], axis=2)
+
+    return X_with_fft, y_sub
 
 # ==========================================================================
 # 多位受試者處理管線
@@ -259,14 +273,38 @@ def extract_window_fft_energy(window_data):
     計算視窗內加速度量值 (Magnitude) 的頻譜能量
     目的：區分 Sitting (低能量) 與 Waist Bends (高能量)
     """
-    # 針對 Magnitude 欄位 (索引 3) 進行 FFT
-    sig = window_data[:, 3] 
+    # 針對 Magnitude 欄位 (索引 3) 進行 FFT，須為原始尺度（Z-score 之前）
+    sig = window_data[:, 3]
     # 執行實數 FFT
     fft_vals = rfft(sig)
     # 計算能量 (去除 DC 分量以集中觀察動作頻率)
     energy = np.sum(np.abs(fft_vals[1:])**2) / len(sig)
-    return energy
+    # 縮放：能量值跨度極大，log1p 壓縮後除以 5 對齊到 0~2 區間（SPEC.md §2.5）
+    return np.log1p(energy) / 5.0
     
+# ==========================================================================
+# Stage 6：DTW 距離計算（取代歐幾里德距離）
+# ==========================================================================
+def dtw_distance(seq_a, seq_b, radius=16):
+    """
+    計算兩個一維時序訊號的 DTW 距離（Sakoe-Chiba band 限制版）。
+    Local cost 採平方差，最終距離開根號，使其與歐幾里德距離同尺度；
+    對角線路徑恆為合法解，故 dtw_distance 恆 <= 對應的歐幾里德距離。
+    """
+    n, m = len(seq_a), len(seq_b)
+    D = np.full((n + 1, m + 1), np.inf)
+    D[0, 0] = 0.0
+
+    for i in range(1, n + 1):
+        j_start = max(1, i - radius)
+        j_end = min(m, i + radius)
+        for j in range(j_start, j_end + 1):
+            cost = (seq_a[i - 1] - seq_b[j - 1]) ** 2
+            D[i, j] = cost + min(D[i - 1, j], D[i, j - 1], D[i - 1, j - 1])
+
+    return np.sqrt(D[n, m])
+
+
 # ==========================================================================
 # 新增頻譜能量計算函式
 # ==========================================================================
@@ -327,6 +365,32 @@ def align_coordinates(X_batch):
 
 
 # ==========================================================================
+# 黃金範本擷取
+# ==========================================================================
+def extract_golden_template(X, y, target_label=7):
+    """從指定受試者的 (X, y) 中擷取第一個符合 target_label 的視窗作為黃金範本。
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        shape (n_windows, 128, 8)，來自 load_and_preprocess_subject()。
+    y : numpy.ndarray
+        shape (n_windows,)，對應每個視窗的多數投票標籤。
+    target_label : int
+        要擷取的目標動作標籤（預設 7：Frontal Elevation of Arms）。
+
+    Returns
+    -------
+    numpy.ndarray
+        shape (128, 8) 的單一視窗，作為黃金範本。
+    """
+    indices = np.where(y == target_label)[0]
+    if len(indices) == 0:
+        raise ValueError(f"找不到標籤為 {target_label} 的視窗，無法擷取黃金範本。")
+    return X[indices[0]]
+
+
+# ==========================================================================
 # 臨床品質檢驗
 # ==========================================================================
 
@@ -382,24 +446,26 @@ class RealTimeStreamProcessor:
         return False, None
 
 class RealTimeBiofeedbackEngine(RealTimeStreamProcessor):
-    def __init__(self, quality_gate, golden_template, model, window_size=128, stride=64):
+    def __init__(self, quality_gate, golden_template, model, window_size=128, stride=64, dtw_radius=16):
         super().__init__(window_size, stride)
         self.gate = quality_gate
         self.golden_template = golden_template
         self.model = model
+        self.dtw_radius = dtw_radius
 
     def calculate_similarity(self, current_window):
         """
         [物理特徵比對] 依照 SPEC 8.5 節實作相似度映射
+        Stage 6：改用 DTW 取代歐幾里德距離，容忍動作節奏（相位）差異。
         """
         current_y = current_window[:, 5] # Grav_Y
         golden_y = self.golden_template[:, 5]
-        
-        distance = np.linalg.norm(current_y - golden_y)
-        
+
+        distance = dtw_distance(current_y, golden_y, radius=self.dtw_radius)
+
         # 評分公式：$Score_{sim} = \max(0, 100 - Distance \times 15)$
         # (這裡微調係數為 15 以提升實時顯示的寬容度)
-        sim_score = max(0, 100 - (distance * 15)) 
+        sim_score = max(0, 100 - (distance * 15))
         return sim_score
 
     def process_live_frame(self, new_frame):

@@ -1,8 +1,9 @@
 # main.py (Week 5 最終驗收報告版)
 from tensorflow.keras.models import load_model
 from schema import (
-    load_and_preprocess_subject, 
-    ClinicalQualityGate, 
+    load_and_preprocess_subject,
+    extract_golden_template,
+    ClinicalQualityGate,
     RealTimeBiofeedbackEngine,
     ACTIVITY_LABELS
 )
@@ -17,8 +18,8 @@ def run_batch_assessment():
     model_v3 = load_model("models/clinical_rehab_model_v3.keras")
 
     # 2. 準備黃金範本 (S10 Label 7)
-    df_s10_X, _ = load_and_preprocess_subject(10, "data/")
-    golden_template = df_s10_X[0] # 取第一個標準視窗作為物理標竿
+    df_s10_X, df_s10_y = load_and_preprocess_subject(10, "data/")
+    golden_template = extract_golden_template(df_s10_X, df_s10_y, target_label=7)
 
     # 3. 初始化引擎 (預留 10 位受試者的統計字典)
     report_summary = []

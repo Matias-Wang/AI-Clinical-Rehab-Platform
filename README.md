@@ -129,10 +129,6 @@ AI-Clinical-Rehab-Platform/
 │
 ├── architecture/                          # 架構圖與評估結果
 │   └── confusion_matrix/                  # 混淆矩陣圖
-│       ├── confusion_matrix_v3_multi.png
-│       ├── confusion_matrix_v3_1_multi.png
-│       ├── S2_Confusion_Matrix_FFT_Acc.png
-│       └── S2_Confusion_Matrix_FFT_Acc_0.78.png
 │
 ├── Spec/                                  # 技術規格文件
 │   └── v3_1_multi_Technical_Spec.md
@@ -145,16 +141,6 @@ AI-Clinical-Rehab-Platform/
 ├── SPEC.md
 ├── CHANGELOG.md
 ```
-
----
-
-## 未來優化 (Future Work)
-
-- **Stage 6 — DTW 演算法優化（進行中）**：在 `RealTimeBiofeedbackEngine.calculate_similarity()` 引入 Dynamic Time Warping（DTW），解決歐幾里德距離對動作節奏過於敏感的問題，提升系統對「正確姿勢但節奏不同」動作的包容度。
-- **架構升級**：評估引入 Transformer (Self-Attention) 機制以處理長序列動作關聯。
-- **數據增強**：針對小樣本動作類別（如 Jump，< 50 筆）實作 Data Augmentation。
-- **產品化**：結合 AWS Cloud 架構與醫療法規 (SaMD)，設計自動化 MLOps 流程。
-- **驗證協議強化**：全面採用 10-Fold LOSO 交叉驗證取代隨機切分。
 
 ---
 

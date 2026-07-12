@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<title>AI 臨床復健平台 - 即時生物回饋展示</title>
+<style>
+  body {
+    font-family: "Segoe UI", "Microsoft JhengHei", sans-serif;
+    background: #111827;
+    color: #f3f4f6;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 40px 16px;
+  }
+  h1 {
+    font-size: 20px;
+    margin-bottom: 4px;
+  }
+  #conn-status {
+    font-size: 13px;
+    color: #9ca3af;
+    margin-bottom: 24px;
+  }
+  #light {
+    width: 160px;
+    height: 160px;
+    border-radius: 50%;
+    background: #4b5563;
+    box-shadow: 0 0 40px rgba(0, 0, 0, 0.5);
+    transition: background 0.2s ease;
+  }
+  #light.RED { background: #ef4444; box-shadow: 0 0 60px #ef4444aa; }
+  #light.YELLOW { background: #eab308; box-shadow: 0 0 60px #eab308aa; }
+  #light.GREEN { background: #22c55e; box-shadow: 0 0 60px #22c55eaa; }
+
+  #panel {
+    margin-top: 28px;
+    width: 360px;
+    max-width: 90vw;
+    background: #1f2937;
+    border-radius: 12px;
+    padding: 20px 24px;
+  }
+  #panel div {
+    display: flex;
+    justify-content: space-between;
+    padding: 6px 0;
+    border-bottom: 1px solid #374151;
+    font-size: 14px;
+  }
+  #panel div:last-child { border-bottom: none; }
+  #msg {
+    margin-top: 16px;
+    font-size: 14px;
+    color: #d1d5db;
+    text-align: center;
+    min-height: 20px;
+  }
+</style>
+</head>
+<body>
+  <h1>AI 臨床復健平台 - 即時生物回饋展示</h1>
+  <div id="conn-status">連線中...</div>
+  <div id="light"></div>
+  <div id="panel">
+    <div><span>受試者</span><span id="val-subject">-</span></div>
+    <div><span>視窗序號</span><span id="val-frame">-</span></div>
+    <div><span>狀態</span><span id="val-status">-</span></div>
+    <div><span>AI 辨識動作</span><span id="val-label">-</span></div>
+    <div><span>綜合評分 (Final Score)</span><span id="val-score">-</span></div>
+    <div><span>相似度評分 (Similarity)</span><span id="val-similarity">-</span></div>
+  </div>
+  <div id="msg"></div>
+
+  <script>
+    const WS_URL = "ws://localhost:8765";
+    const connStatusEl = document.getElementById("conn-status");
+    const lightEl = document.getElementById("light");
+    const msgEl = document.getElementById("msg");
+    const fields = {
+      subject: document.getElementById("val-subject"),
+      frame: document.getElementById("val-frame"),
+      status: document.getElementById("val-status"),
+      label: document.getElementById("val-label"),
+      score: document.getElementById("val-score"),
+      similarity: document.getElementById("val-similarity"),
+    };
+
+    function connect() {
+      const socket = new WebSocket(WS_URL);
+
+      socket.onopen = () => {
+        connStatusEl.textContent = "已連線至 " + WS_URL;
+      };
+
+      socket.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        lightEl.className = data.ui_color || "";
+        fields.subject.textContent = "S" + String(data.subject_id).padStart(2, "0");
+        fields.frame.textContent = data.frame_index;
+        fields.status.textContent = data.status;
+        fields.label.textContent = data.predict_label_name || "-";
+        fields.score.textContent = data.score.toFixed(1);
+        fields.similarity.textContent = data.similarity.toFixed(1);
+        msgEl.textContent = data.msg || "";
+      };
+
+      socket.onclose = () => {
+        connStatusEl.textContent = "連線中斷，3 秒後重試...";
+        lightEl.className = "";
+        setTimeout(connect, 3000);
+      };
+
+      socket.onerror = () => {
+        socket.close();
+      };
+    }
+
+    connect();
+  </script>
+</body>
+</html>
