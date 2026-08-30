@@ -8,8 +8,8 @@
 |------|------|
 | **專案名稱** | AI-Clinical-Rehab-Platform |
 | **核心目標** | 利用 mHealth 感測器數據（加速度、重力分量、FFT 能量）實現即時復健動作辨識與臨床品質監控，並提供生物回饋評分 |
-| **目前進度** | Stage 8 之 A/D/F 完成（髒數據防護、緩衝區復原、回歸測試基礎建設 + cp950 修正）；剩餘 B/C 與壓力測試 |
-| **當前日期** | 2026-08-30 |
+| **目前進度** | Stage 8 之 A/C/D/F 完成（髒數據防護、推論路徑最佳化、緩衝區復原、回歸測試基礎建設 + cp950 修正）；剩餘 B 與 E |
+| **當前日期** | 2026-08-31 |
 
 ---
 
@@ -24,7 +24,7 @@
 | `ui_bridge.py` | Stage 7 新增。WebSocket 即時資料橋接伺服器，將 `RealTimeBiofeedbackEngine` 的推論結果推播給前端 |
 | `frontend/demo.html` | Stage 7 新增。最小展示前端，連線 `ui_bridge.py` 顯示紅/黃/綠燈號與評分 |
 | `console.py` | Stage 8 新增。提供 `enable_utf8_output()`，於入口點將 stdout/stderr 設為 UTF-8，避免輸出被重導時因 cp950 崩潰 |
-| `tests/` | Stage 8 新增。72 項自動化回歸測試，釘死 Fix 2／Fix 3 等致命修正。以 `pytest` 執行，`-m "not slow"` 可略過需要 TensorFlow 的準確率基準測試 |
+| `tests/` | Stage 8 新增。73 項自動化回歸測試，釘死 Fix 2／Fix 3 等致命修正。以 `pytest` 執行，`-m "not slow"` 可略過需要 TensorFlow 的準確率基準測試 |
 | `models/clinical_rehab_model_v3.keras` | Stage 3 訓練之 v3.1_multi 模型。輸入維度為 $(1, 128, 8)$ |
 
 ---
@@ -165,13 +165,26 @@ $$Final = (Score_{quality} \times 0.4) + (Score_{sim} \times 0.6)$$
 
 `python main.py > out.log` 原本會崩潰於 `UnicodeEncodeError`，批量驗收報告無法完整輸出。新增 `console.py` 於入口點統一設定 UTF-8 輸出。
 
-#### B — 推論阻塞 event loop ⏳ 待處理
+#### B — 推論阻塞 event loop ⏳ 待重新評估
 
-`model.predict()` 為同步呼叫，跑在 `ui_bridge.py` 的 asyncio 主迴圈上，每次推論會凍結整個 WebSocket 伺服器，client 數增加時延遲會疊加。規劃以 `asyncio.to_thread()` 隔離。
+推論為同步呼叫，跑在 `ui_bridge.py` 的 asyncio 主迴圈上，執行期間整個 WebSocket 伺服器無法服務其他事件。原規劃以 `asyncio.to_thread()` 隔離，但 C 完成後單次推論僅 2.49 ms，阻塞影響大幅下降（見 C 的連帶影響說明），須先實測 event loop 實際延遲再決定是否值得引入執行緒的複雜度。
 
-#### C — 推論記憶體成長 ⏳ 待處理
+#### C — 推論路徑最佳化 ✅ 已完成 (2026-08-31)
 
-`model.predict()` 在迴圈中重複呼叫會累積 function trace，為 Keras 已知的記憶體成長來源，直接對應本 Stage 的 Memory Leak 驗證目標。規劃改用 `model(input_data, training=False)`。
+- `process_live_frame()` 的推論由 `model.predict(x, verbose=0)` 改為 `model.predict_on_batch(x)`。
+- **實測推翻了原規劃**：本項原記載應改用 `model(x, training=False)`（Keras 通則），但在此專案的 Keras 3.13.2 環境下實測反而最慢（145.64 ms）。四個候選方案實測後採用 `predict_on_batch()`。
+
+  | 方案 | 延遲中位數 | 2000 次後 RSS |
+  |------|-----------|---------------|
+  | `predict()`（原） | 94.91 ms | +5.5 MB |
+  | `model(x, training=False)` | 145.64 ms | +0.0 MB |
+  | **`predict_on_batch()`（採用）** | **2.49 ms** | **+0.0 MB** |
+
+- 輸出逐位元相同（最大絕對差異 0.0），所有既有驗收數字不受影響。
+- 端到端 `python main.py` 由 256 秒降至 44 秒（5.8 倍），輸出逐行完全相同。
+- 新增守門測試防止回退至 `predict()`。
+
+**對 B 的連帶影響**：B 的急迫性建立在「推論很慢」之上。推論由 94.91 ms 降至 2.49 ms 後，以 `--speed 20` 計算（每 64 ms 產生一個視窗），event loop 阻塞佔比由約 148%（根本追不上）降至約 4%，B 已非急迫項目，需重新量測後再決定是否實作。
 
 #### E — 壓力測試與交付文件 ⏳ 待處理
 
@@ -205,8 +218,8 @@ $$Final = (Score_{quality} \times 0.4) + (Score_{sim} \times 0.6)$$
 
 Stage 8 的 A（髒數據防護）、D（緩衝區復原）、F（回歸測試基礎建設）與 cp950 編碼修正已完成，請接續執行 **Stage 8 的 B、C、E**。
 
-**首要任務**：處理 B 與 C——將 `model.predict()` 從 asyncio 主迴圈上移開（`asyncio.to_thread()`），並改用 `model(input_data, training=False)` 消除迴圈中的記憶體成長。
+**首要任務**：執行 E 的長時間壓力測試（以 `get_health_stats()` 監控緩衝區），並重新評估 B 是否值得實作。
 
-**動手前請先執行 `pytest`**：專案現有 72 項回歸測試，B/C 會動到推論路徑，準確率基準測試（`tests/test_model_accuracy_baseline.py`）可直接驗證行為未變。任何修改後測試必須維持全綠。
+**動手前請先執行 `pytest`**：專案現有 73 項回歸測試。若要動到推論路徑，準確率基準測試（`tests/test_model_accuracy_baseline.py`）可直接驗證行為未變。任何修改後測試必須維持全綠。
 
 **完成 B/C 後**：執行 E 的長時間壓力測試（以 `get_health_stats()` 監控緩衝區），並整理交付文件。

@@ -4,6 +4,28 @@
 
 ---
 
+## [Stage 8 — C] — 2026-08-31 — 即時推論路徑最佳化
+
+### Changed
+- **`RealTimeBiofeedbackEngine.process_live_frame()`**：模型推論由 `model.predict(x, verbose=0)` 改為 `model.predict_on_batch(x)`。`predict()` 為批次導向 API，每次呼叫都會建立 data adapter 與 tf.function 追蹤，用於「單一視窗、高頻重複」的即時推論時開銷極高，且會持續累積記憶體。
+
+### Notes
+- 實測數據（Keras 3.13.2，單筆 `(1, 128, 8)` 輸入，150 次取中位數）：
+
+  | 方案 | 延遲中位數 | p95 | 2000 次後 RSS |
+  |------|-----------|-----|---------------|
+  | `predict()`（原） | 94.91 ms | 212.65 ms | +5.5 MB |
+  | `model(x, training=False)` | 145.64 ms | 420.59 ms | +0.0 MB |
+  | **`predict_on_batch()`（採用）** | **2.49 ms** | **3.38 ms** | **+0.0 MB** |
+  | `tf.function()` 包裝 | 2.57 ms | 3.59 ms | +0.0 MB |
+
+- **輸出逐位元相同**（最大絕對差異 `0.000e+00`，argmax 全部一致），故所有既有驗收數字不受影響。
+- 端到端：`python main.py` 由 **256 秒降至 44 秒**（5.8 倍），輸出與修改前逐行完全相同。
+- 修正先前規劃：Roadmap 原記載此項應改用 `model(x, training=False)`（Keras 通則），但在本專案的 Keras 3.13 環境下實測反而最慢，已改採 `predict_on_batch()`。
+- 新增回歸守門測試 `test_uses_predict_on_batch_not_predict`，以 stub model 分別計數兩條推論路徑，防止日後回退。
+
+---
+
 ## [Stage 8 — A/D/F] — 2026-08-30 — 臨床串流防護、緩衝區復原與回歸測試
 
 ### Added

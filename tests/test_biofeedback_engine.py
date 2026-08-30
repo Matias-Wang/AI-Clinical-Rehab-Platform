@@ -11,17 +11,33 @@ from schema import ClinicalQualityGate, RealTimeBiofeedbackEngine
 
 
 class StubModel:
-    """固定回傳 Label 7 的假模型，用於隔離模型推論以外的邏輯。"""
+    """固定回傳 Label 7 的假模型，用於隔離模型推論以外的邏輯。
+
+    同時提供 `predict()` 與 `predict_on_batch()` 並分別計數，
+    讓測試能驗證引擎走的是 Stage 8 (C) 指定的低開銷推論路徑。
+    """
 
     def __init__(self) -> None:
         self.call_count = 0
+        self.legacy_predict_count = 0
 
-    def predict(self, input_data: np.ndarray, verbose: int = 0) -> np.ndarray:
+    @staticmethod
+    def _probs() -> np.ndarray:
         """回傳 one-hot 於索引 7 的 (1, 13) 機率陣列。"""
-        self.call_count += 1
         probs = np.zeros((1, 13))
         probs[0, 7] = 1.0
         return probs
+
+    def predict_on_batch(self, input_data: np.ndarray) -> np.ndarray:
+        """Stage 8 (C) 起，引擎應走此路徑。"""
+        self.call_count += 1
+        return self._probs()
+
+    def predict(self, input_data: np.ndarray, verbose: int = 0) -> np.ndarray:
+        """舊路徑：開銷高且會累積記憶體，引擎不應再呼叫。"""
+        self.call_count += 1
+        self.legacy_predict_count += 1
+        return self._probs()
 
 
 @pytest.fixture
@@ -125,6 +141,22 @@ class TestCleanPathUnchanged:
         }
         assert proceed["ui_color"] in {"GREEN", "YELLOW"}
         assert 0 <= proceed["score"] <= 100
+
+    def test_uses_predict_on_batch_not_predict(self, engine):
+        """Stage 8 (C) 回歸：推論必須走 `predict_on_batch()`。
+
+        `predict()` 為批次導向 API，用於單一視窗的高頻即時推論時，
+        實測延遲為 `predict_on_batch()` 的約 38 倍（94.91 ms vs 2.49 ms），
+        且每 2000 次推論累積約 5.5 MB 記憶體。兩者輸出逐位元相同，
+        因此改用前者純屬損失而無任何好處。
+        """
+        for frame in dynamic_frames(300):
+            engine.process_live_frame(frame)
+
+        assert engine.model.call_count > 0, "引擎完全沒有執行推論，測試前提不成立。"
+        assert engine.model.legacy_predict_count == 0, (
+            "引擎仍在呼叫 model.predict()，Stage 8 (C) 的推論路徑最佳化已回退。"
+        )
 
     def test_static_input_still_halts_with_low_quality(self, engine):
         """靜態輸入仍應以 LOW_QUALITY 原因被攔截。"""

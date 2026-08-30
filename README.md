@@ -95,7 +95,7 @@ python ui_bridge.py --subject 10 --port 8765 --speed 20
 ### 執行回歸測試
 
 ```bash
-# 全套測試（72 項，含需要 TensorFlow 的準確率基準）
+# 全套測試（73 項，含需要 TensorFlow 的準確率基準）
 pytest
 
 # 僅快速測試（約 3 秒，免載入 TensorFlow）
@@ -129,7 +129,8 @@ pytest -m "not slow"
 - **即時生物回饋引擎 (RealTimeBiofeedbackEngine)**：整合品質閘門與 DTW 相似度評分的即時決策中心，輸出 紅/黃/綠 三色 UI 引導狀態。
 - **DTW 姿態相似度**：以 Dynamic Time Warping（Sakoe-Chiba band，radius=16）取代點對點的歐幾里德距離，容忍動作節奏差異——姿勢正確但速度略慢的患者不再被誤判為做錯。
 - **即時資料橋接 (WebSocket)**：`ui_bridge.py` 將推論結果即時 broadcast 給前端，`frontend/demo.html` 提供無框架的最小展示頁面。
-- **自動化回歸測試**：`tests/` 提供 72 項測試，釘死 Fix 1/2/3 等致命修正，並以突變測試驗證測試本身的鑑別力。
+- **低延遲即時推論**：以 `predict_on_batch()` 執行單視窗推論（中位數 2.49 ms），相較批次導向的 `predict()`（94.91 ms）快約 38 倍且無記憶體累積，輸出逐位元相同。
+- **自動化回歸測試**：`tests/` 提供 73 項測試，釘死 Fix 1/2/3 等致命修正與推論路徑選擇，並以突變測試驗證測試本身的鑑別力。
 
 ### 實驗筆記本
 
@@ -154,7 +155,7 @@ AI-Clinical-Rehab-Platform/
 ├── requirements.txt                       # 依賴套件清單
 ├── pytest.ini                             # 測試設定
 │
-├── tests/                                 # 自動化回歸測試（72 項）
+├── tests/                                 # 自動化回歸測試（73 項）
 │
 ├── frontend/                              # 最小展示前端
 │   └── demo.html                          # 自包含 HTML/JS，顯示即時燈號與評分

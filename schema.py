@@ -678,8 +678,16 @@ class RealTimeBiofeedbackEngine(RealTimeStreamProcessor):
             }
 
         # 2. 執行 Week 3 (v3) 模型推論
+        # Stage 8 (C)：改用 predict_on_batch() 取代 predict()。
+        # predict() 為批次導向 API，每次呼叫都會建立 data adapter 與
+        # tf.function 追蹤，用於「單一視窗、高頻重複」的即時推論時開銷極高，
+        # 且會持續累積記憶體。實測（Keras 3.13，單筆 (1, 128, 8)）：
+        #   predict()          中位數 94.91 ms，2000 次後 RSS +5.5 MB
+        #   predict_on_batch() 中位數  2.49 ms，2000 次後 RSS +0.0 MB
+        # 兩者輸出逐位元相同（最大絕對差異 0.0），故不影響任何既有驗收數字。
+        # 註：model(x, training=False) 亦曾評估，但在此版本反而更慢（145 ms）。
         input_data = np.expand_dims(window_data, axis=0) # 符合 (1, 128, 8)
-        prediction = self.model.predict(input_data, verbose=0)
+        prediction = self.model.predict_on_batch(input_data)
         predict_label = np.argmax(prediction)
         
         # 3. 相似度與綜合評分 (0.4 品質 + 0.6 姿勢)

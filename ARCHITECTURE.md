@@ -173,7 +173,8 @@ Input: (128, 8)
 | Stage 6 | (128, 8) | + DTW 相似度演算法 | 動作節奏（相位）過度敏感 | 已完成 |
 | Stage 7 | (128, 8) | + ui_bridge.py（WebSocket）+ frontend/demo.html | 分析結果僅能終端機輸出，尚未對接前端 | 已完成 |
 | Fix 3 | (128, 8) | 補回 Acc/Mag 受試者級 Z-score 與 FFT log1p/5.0 縮放 | Train/Serving Skew：12 類中 4 類從未被預測 | 已完成 |
-| Stage 8 A/D/F | (128, 8) | + 影格驗證／緩衝區復原／回歸測試（72 項） | 髒數據可穿透品質閘門；無任何自動化測試保護 | **當前版本** |
+| Stage 8 A/D/F | (128, 8) | + 影格驗證／緩衝區復原／回歸測試（72 項） | 髒數據可穿透品質閘門；無任何自動化測試保護 | 已完成 |
+| Stage 8 C | (128, 8) | 推論改用 `predict_on_batch()` | 單筆推論 94.91 ms 且持續累積記憶體 | **當前版本** |
 
 ---
 
@@ -215,7 +216,7 @@ Input: (128, 8)
 
 ### 自動化回歸測試（Stage 8 新增）
 
-模型層之外，`tests/` 提供程式碼層級的回歸保護，共 72 項：
+模型層之外，`tests/` 提供程式碼層級的回歸保護，共 73 項：
 
 | 測試模組 | 保護目標 |
 |----------|----------|
@@ -243,7 +244,7 @@ AI-Clinical-Rehab-Platform/
 ├── requirements.txt                  # 依賴清單
 ├── pytest.ini                        # [Stage 8] 測試設定（testpaths、slow marker）
 │
-├── tests/                            # [Stage 8] 自動化回歸測試（72 項）
+├── tests/                            # [Stage 8] 自動化回歸測試（73 項）
 │   ├── conftest.py                   # 共用 fixture 與受試者資料快取
 │   ├── test_preprocessing_fixes.py   # Fix 1/2/3 回歸
 │   ├── test_quality_gate.py          # 品質閘門 NaN 防護與門檻
@@ -304,10 +305,11 @@ AI-Clinical-Rehab-Platform/
 
 - **Stage 8 A/D/F — 臨床串流防護與測試基礎建設**：品質閘門補上 NaN/Inf fail-safe（原本 `NaN < 門檻` 恆為 False，髒數據可直接穿透至模型）；`RealTimeStreamProcessor` 新增影格驗證、緩衝區復原與健康度統計；建立首套自動化回歸測試（72 項），並以突變測試驗證其鑑別力。
 
+- **Stage 8 C — 即時推論路徑最佳化**：`process_live_frame()` 的推論由 `predict()` 改為 `predict_on_batch()`。前者為批次導向 API，每次呼叫都會建立 data adapter 與 tf.function 追蹤，用於單一視窗的高頻推論時開銷主導了執行時間（94.91 ms → 2.49 ms，端到端 256 秒 → 44 秒），且會持續累積記憶體。輸出逐位元相同。
+
 ### 近期（Stage 8 剩餘，進行中）
 
-- **B — 推論阻塞 event loop**：`model.predict()` 為同步呼叫，跑在 asyncio 主迴圈上，每次推論會凍結整個 WebSocket 伺服器。規劃以 `asyncio.to_thread()` 隔離。
-- **C — 推論記憶體成長**：`model.predict()` 在迴圈中重複呼叫會累積 function trace。規劃改用 `model(input_data, training=False)`。
+- **B — 推論阻塞 event loop（待重新評估）**：推論為同步呼叫，跑在 asyncio 主迴圈上。C 完成後單次推論降至 2.49 ms，阻塞影響大幅下降，須先實測 event loop 實際延遲再決定是否引入執行緒複雜度。
 - **E — 壓力測試與交付**：長時間循環運行全量受試者數據，以 `get_health_stats()` 監控 `RealTimeStreamProcessor` 緩衝區穩定性；整理正式部署文件。
 
 ### 中期（產品化）
