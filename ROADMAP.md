@@ -8,8 +8,8 @@
 |------|------|
 | **專案名稱** | AI-Clinical-Rehab-Platform |
 | **核心目標** | 利用 mHealth 感測器數據（加速度、重力分量、FFT 能量）實現即時復健動作辨識與臨床品質監控，並提供生物回饋評分 |
-| **目前進度** | Stage 7 完成 + Fix 3（Acc/Mag Z-score 與 FFT 縮放修復，模型準確率回復至 ~92.6%） |
-| **當前日期** | 2026-07-12 |
+| **目前進度** | Stage 8 之 A/D/F 完成（髒數據防護、緩衝區復原、回歸測試基礎建設 + cp950 修正）；剩餘 B/C 與壓力測試 |
+| **當前日期** | 2026-08-30 |
 
 ---
 
@@ -23,6 +23,8 @@
 | `main.py` | 產品入口點。實現自動化批量測試與實時模擬，支持多受試者會期切換 |
 | `ui_bridge.py` | Stage 7 新增。WebSocket 即時資料橋接伺服器，將 `RealTimeBiofeedbackEngine` 的推論結果推播給前端 |
 | `frontend/demo.html` | Stage 7 新增。最小展示前端，連線 `ui_bridge.py` 顯示紅/黃/綠燈號與評分 |
+| `console.py` | Stage 8 新增。提供 `enable_utf8_output()`，於入口點將 stdout/stderr 設為 UTF-8，避免輸出被重導時因 cp950 崩潰 |
+| `tests/` | Stage 8 新增。72 項自動化回歸測試，釘死 Fix 2／Fix 3 等致命修正。以 `pytest` 執行，`-m "not slow"` 可略過需要 TensorFlow 的準確率基準測試 |
 | `models/clinical_rehab_model_v3.keras` | Stage 3 訓練之 v3.1_multi 模型。輸入維度為 $(1, 128, 8)$ |
 
 ---
@@ -131,16 +133,49 @@ $$Final = (Score_{quality} \times 0.4) + (Score_{sim} \times 0.6)$$
 - 正式的 3D 前端視覺組件（`frontend/demo.html` 僅為驗證串接用的 2D 展示頁）。
 - 高頻率（50Hz 真實速率）長時間串流的延遲與穩定性壓力測試（見 Stage 8）。
 
-### Stage 8 — 最終壓力測試與交付
+### Stage 8 — 最終壓力測試與交付（進行中）
 
 **目前痛點**：系統即將交付，必須確保在長時間、高併發或異常斷訊的臨床環境下，系統不會發生記憶體洩漏（Memory Leak）或無預警崩潰。
 
-**核心任務**：
+依風險排序拆為 A–F 六項子任務，A/D/F 已於 2026-08-30 完成。
 
-- 極限壓力測試（Stress Testing）：長時間循環運行全量受試者數據（S1–S10），測試 RealTimeStreamProcessor 的緩衝區在極端情況下的穩定性。
+#### A — 髒數據防護 ✅ 已完成 (2026-08-30)
 
-- 例外與錯誤處理（Exception Handling）：針對感測器斷訊、髒數據、硬體噪音或未定義動作標籤等臨床意外，建立完善的系統防護與自動重啟機制。
+- `ClinicalQualityGate.get_quality_report()` 補上 `np.isfinite()` 防護。原本 `NaN < MIN_SAFE_LIMIT` 在 IEEE 754 下恆為 False，含 NaN 的視窗會被判定為「品質良好」並直接送入模型推論。
+- 新增 `RealTimeStreamProcessor.validate_frame()`，於影格進入緩衝區前攔截維度錯誤、NaN/Inf、非數值型別與超出生理範圍的資料。
+- 新增例外階層 `SensorStreamError` / `DirtyFrameError` / `SensorDisconnectedError`；連續 25 幀髒數據（0.5 秒 @ 50Hz）升級為斷訊。
+- **設計要點**：邊界檢查採標準化後尺度（Z-score 50 個標準差），而非文件中的 50 m/s² 原始物理門檻——進入串流處理器的資料已完成標準化，沿用原始門檻會使檢查完全失效。
 
+#### D — 緩衝區復原 ✅ 已完成 (2026-08-30)
+
+- 新增 `reset_buffer()`，髒影格被攔截時同步清空 deque 與步長計數器，避免後續最多 128 步的視窗沿用被污染的緩衝。
+- `process_live_frame()` 將例外轉為紅燈結果而非向外拋出，並僅在「乾淨→髒」轉換點輸出，避免洪水式推播。
+- `ui_bridge.py` 的 except 區塊補上 `engine.reset_buffer()`。
+- 結果新增 `reason` 欄位（`OK` / `LOW_QUALITY` / `DIRTY_DATA` / `DISCONNECTED`），`status` 維持原值，故 `main.py` 與 `demo.html` 無需改動。
+- 新增 `get_health_stats()`，供壓力測試監控緩衝區與髒數據比例。
+
+#### F — 回歸測試基礎建設 ✅ 已完成 (2026-08-30)
+
+- 新增 `tests/`，共 72 項測試。專案在此之前沒有任何自動化測試，Fix 2／Fix 3 僅存在於文件記載。
+- **Fix 3 順序陷阱的精確不變量**：若 Z-score 誤排到 FFT 之前，第 7 欄能量會恰好等於以已標準化的 Magnitude 重算的結果，直接斷言兩者必須不同即可在 3 秒內攔截，無需載入 TensorFlow。
+- 準確率基準測試對照訓練 notebook（S02=0.8430、S07=0.9045、S09=0.9065、S10=0.9029），標記 `slow`。
+- 經突變測試驗證：注入 4 個已修復的回歸，測試分別失敗 2／7／4／3 項。
+
+#### 附帶修正 — cp950 輸出編碼 ✅ 已完成 (2026-08-30)
+
+`python main.py > out.log` 原本會崩潰於 `UnicodeEncodeError`，批量驗收報告無法完整輸出。新增 `console.py` 於入口點統一設定 UTF-8 輸出。
+
+#### B — 推論阻塞 event loop ⏳ 待處理
+
+`model.predict()` 為同步呼叫，跑在 `ui_bridge.py` 的 asyncio 主迴圈上，每次推論會凍結整個 WebSocket 伺服器，client 數增加時延遲會疊加。規劃以 `asyncio.to_thread()` 隔離。
+
+#### C — 推論記憶體成長 ⏳ 待處理
+
+`model.predict()` 在迴圈中重複呼叫會累積 function trace，為 Keras 已知的記憶體成長來源，直接對應本 Stage 的 Memory Leak 驗證目標。規劃改用 `model(input_data, training=False)`。
+
+#### E — 壓力測試與交付文件 ⏳ 待處理
+
+- 極限壓力測試：長時間循環運行全量受試者數據（S1–S10），以 `get_health_stats()` 監控 `RealTimeStreamProcessor` 緩衝區在極端情況下的穩定性。
 - 撰寫技術文檔與手冊：將 Week 1 到 Week 8 的研發歷程、8D 特徵技術規格、物理門檻參數（0.0005 變異數限制）以及系統啟動指令，完整整理為正式的部署指南（README.md 與技術白皮書）。
 
 **預期產出**：
@@ -168,6 +203,10 @@ $$Final = (Score_{quality} \times 0.4) + (Score_{sim} \times 0.6)$$
 
 ## 📝 指令給下一位 AI
 
-Stage 7（`ui_bridge.py` 即時資料橋接 + 最小展示前端）已完成，請根據上述 Roadmap 執行 **Stage 8** 的任務。
+Stage 8 的 A（髒數據防護）、D（緩衝區復原）、F（回歸測試基礎建設）與 cp950 編碼修正已完成，請接續執行 **Stage 8 的 B、C、E**。
 
-**首要任務**：對 `RealTimeStreamProcessor` / `ui_bridge.py` 執行長時間、全量受試者（S1–S10）循環的壓力測試，並補強例外與錯誤處理（感測器斷訊、髒數據等臨床意外情境）。
+**首要任務**：處理 B 與 C——將 `model.predict()` 從 asyncio 主迴圈上移開（`asyncio.to_thread()`），並改用 `model(input_data, training=False)` 消除迴圈中的記憶體成長。
+
+**動手前請先執行 `pytest`**：專案現有 72 項回歸測試，B/C 會動到推論路徑，準確率基準測試（`tests/test_model_accuracy_baseline.py`）可直接驗證行為未變。任何修改後測試必須維持全綠。
+
+**完成 B/C 後**：執行 E 的長時間壓力測試（以 `get_health_stats()` 監控緩衝區），並整理交付文件。

@@ -4,6 +4,34 @@
 
 ---
 
+## [Stage 8 — A/D/F] — 2026-08-30 — 臨床串流防護、緩衝區復原與回歸測試
+
+### Added
+- **`tests/`**：專案首套自動化測試（72 項），涵蓋預處理修正、品質閘門、串流處理器、DTW 數學性質、引擎狀態機與模型準確率基準。準確率基準測試標記 `slow`，缺少 TensorFlow 或模型檔時自動 skip。新增 `pytest.ini` 設定 testpaths 與 marker。
+- **`console.py`**：新增 `enable_utf8_output()`，於入口點將 stdout/stderr 設為 UTF-8。
+- **`RealTimeStreamProcessor.validate_frame()`**：於影格進入緩衝區前攔截維度錯誤、NaN/Inf、非數值型別與超出生理範圍的資料。
+- **`RealTimeStreamProcessor.reset_buffer()`**：清空 deque 與步長計數器，供髒數據攔截後的復原使用。
+- **`RealTimeStreamProcessor.get_health_stats()`**：回傳總影格數、髒影格數、髒數據比例、緩衝區重置次數與目前緩衝長度，供長時間壓力測試監控。
+- **例外階層**：`SensorStreamError`（基底）、`DirtyFrameError`、`SensorDisconnectedError`。
+- **`STREAM_GUARD` 常數**：`N_FEATURES=8`、`SANITY_ABS_LIMIT=50.0`（標準化後尺度）、`DISCONNECT_DIRTY_FRAMES=25`（0.5 秒 @ 50Hz）。
+- **結果 `reason` 欄位**：`OK` / `LOW_QUALITY` / `DIRTY_DATA` / `DISCONNECTED`，同步加入 WebSocket 推播 JSON。
+
+### Fixed
+- **`ClinicalQualityGate.get_quality_report()`**：補上 `np.isfinite(var_y)` 防護。原本 `NaN < MIN_SAFE_LIMIT` 在 IEEE 754 下恆為 False，含 NaN 的視窗會被判定為「品質良好」並直接送入模型推論，品質閘門在最需要攔截時完全失效。
+- **`ui_bridge.py` 例外處理**：except 區塊補上 `engine.reset_buffer()`。原本只印出錯誤就繼續，造成例外的資料仍殘留在 deque 中，後續最多 128 步的視窗都會沿用被污染的緩衝。
+- **cp950 輸出編碼**：`python main.py > out.log` 原本會在第一位受試者結果處崩潰（`UnicodeEncodeError`），批量驗收報告無法完整輸出。問題橫跨 `main.py`、`inference_test.py` 與 `schema.py`；因 `schema.py` 的訊息字元會送至前端顯示，改以入口點統一設定 UTF-8 解決，而非移除 emoji。
+
+### Removed
+- **`inference_test.py`**：呼叫 `RealTimeBiofeedbackEngine` 時缺少 `model` 參數，已無法執行；驗證範圍由 `tests/test_biofeedback_engine.py` 涵蓋。
+
+### Notes
+- `status` 欄位維持原值（`HALT` / `PROCEED`），髒數據與斷訊皆歸類為 `HALT`，因此 `main.py` 與 `frontend/demo.html` 無需任何改動。
+- 經突變測試驗證測試品質：逐一注入 4 個已修復的回歸（移除重力 ÷10.0、Z-score 提前至 FFT 之前、移除 NaN 防護、移除緩衝區清空），測試分別失敗 2／7／4／3 項。
+- 驗收數字完全保留：`python main.py` 端到端通過，S01=3.5%、S02=5.1%、S03=16.5%、S04=15.1%、S10=20.6%。
+- 專案維護：以 `git filter-repo` 清除誤入版控的 217MB `data_raw/` 歷史 blob，`.git` 由 95MB 降至 7.7MB，21 個 commit 全數保留。
+
+---
+
 ## [Fix 3] — 2026-07-12 — Acc/Mag Z-score 與 FFT 縮放修復（Train/Serving Skew）
 
 ### Fixed

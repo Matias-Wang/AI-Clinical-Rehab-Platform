@@ -12,9 +12,9 @@
                  │ 呼叫               │ 呼叫
 ┌────────────────▼───────────────────▼─────────────────────┐
 │              核心引擎層 (schema.py)                       │
-│  RealTimeStreamProcessor（滑動視窗緩衝）                  │
+│  RealTimeStreamProcessor（滑動視窗緩衝 + 髒數據攔截）      │
 │  RealTimeBiofeedbackEngine（品質閘門 + 相似度決策）        │
-│  ClinicalQualityGate（Grav_Y 變異數品質評估）             │
+│  ClinicalQualityGate（Grav_Y 變異數品質評估 + NaN 防護）   │
 └────────────────┬────────────────────────────────────────┘
                  │ 讀取
 ┌────────────────▼────────────────────────────────────────┐
@@ -54,6 +54,14 @@ ui_bridge.py
 
 frontend/demo.html
 └── 瀏覽器原生 WebSocket API（無框架、無 build tooling）
+
+console.py（Stage 8）
+└── sys                             # stdout/stderr 重設為 UTF-8，無第三方依賴
+
+tests/（Stage 8）
+├── pytest                          # 測試框架
+├── schema.py / console.py          # 受測目標
+└── tensorflow.keras                # 僅 slow 標記的準確率基準測試需要
 
 development_history/*.ipynb（歷史實驗）
 ├── schema.py                       # 共用資料管線
@@ -163,7 +171,9 @@ Input: (128, 8)
 | Generation 4 | (128, 8) | + ClinicalQualityGate | Data-Centric 前端品質控制 | 實驗完成 |
 | Week 5（產品化）| (128, 8) | + RealTimeStreamProcessor / RealTimeBiofeedbackEngine | Notebook → 生產腳本遷移，批量驗收管線建立 | 已完成 |
 | Stage 6 | (128, 8) | + DTW 相似度演算法 | 動作節奏（相位）過度敏感 | 已完成 |
-| Stage 7 | (128, 8) | + ui_bridge.py（WebSocket）+ frontend/demo.html | 分析結果僅能終端機輸出，尚未對接前端 | **當前版本** |
+| Stage 7 | (128, 8) | + ui_bridge.py（WebSocket）+ frontend/demo.html | 分析結果僅能終端機輸出，尚未對接前端 | 已完成 |
+| Fix 3 | (128, 8) | 補回 Acc/Mag 受試者級 Z-score 與 FFT log1p/5.0 縮放 | Train/Serving Skew：12 類中 4 類從未被預測 | 已完成 |
+| Stage 8 A/D/F | (128, 8) | + 影格驗證／緩衝區復原／回歸測試（72 項） | 髒數據可穿透品質閘門；無任何自動化測試保護 | **當前版本** |
 
 ---
 
@@ -203,6 +213,22 @@ Input: (128, 8)
                 確保跨個體泛化能力
 ```
 
+### 自動化回歸測試（Stage 8 新增）
+
+模型層之外，`tests/` 提供程式碼層級的回歸保護，共 72 項：
+
+| 測試模組 | 保護目標 |
+|----------|----------|
+| `test_preprocessing_fixes.py` | Fix 1（8D 維度）、Fix 2（重力 ÷10.0）、Fix 3（Z-score 與 FFT 順序） |
+| `test_quality_gate.py` | NaN/Inf fail-safe、門檻常數、S10 合格率驗收基準 |
+| `test_stream_processor.py` | 視窗輸出節奏、髒影格攔截、緩衝區復原、斷訊升級、健康度統計 |
+| `test_biofeedback_engine.py` | 引擎狀態機、髒數據不進模型、復原後恢復推論、乾淨路徑輸出格式 |
+| `test_dtw.py` | DTW 對稱性、非負性、**DTW ≤ 歐幾里德距離**（Stage 6 免校準的依據） |
+| `test_console_encoding.py` | cp950 崩潰情境（含對照組證明測試具鑑別力） |
+| `test_model_accuracy_baseline.py` | 對照訓練 notebook 的準確率基準（標記 `slow`） |
+
+**測試品質驗收**：以突變測試確認測試具鑑別力——逐一注入 4 個已修復的回歸，測試分別失敗 2／7／4／3 項。
+
 ---
 
 ## 8. 資料夾架構
@@ -213,29 +239,38 @@ AI-Clinical-Rehab-Platform/
 ├── schema.py                         # [核心] 資料管線 + 即時引擎（ClinicalQualityGate、RealTimeStreamProcessor、RealTimeBiofeedbackEngine）
 ├── main.py                           # [入口] 批量驗收測試（S1–S10 自動化）
 ├── ui_bridge.py                      # [Stage 7] WebSocket 即時資料橋接伺服器
+├── console.py                        # [Stage 8] UTF-8 輸出設定（避免 cp950 編碼崩潰）
 ├── requirements.txt                  # 依賴清單
+├── pytest.ini                        # [Stage 8] 測試設定（testpaths、slow marker）
+│
+├── tests/                            # [Stage 8] 自動化回歸測試（72 項）
+│   ├── conftest.py                   # 共用 fixture 與受試者資料快取
+│   ├── test_preprocessing_fixes.py   # Fix 1/2/3 回歸
+│   ├── test_quality_gate.py          # 品質閘門 NaN 防護與門檻
+│   ├── test_stream_processor.py      # 髒數據攔截與緩衝區復原
+│   ├── test_biofeedback_engine.py    # 引擎狀態機（stub model，免 TF）
+│   ├── test_dtw.py                   # DTW 數學性質
+│   ├── test_console_encoding.py      # cp950 編碼回歸
+│   └── test_model_accuracy_baseline.py  # 準確率基準（slow）
 │
 ├── frontend/                         # [Stage 7] 最小展示前端
 │   └── demo.html                     # 自包含 HTML/JS，透過 WebSocket 顯示即時燈號與評分
 │
-├── data/                             # 原始資料
+├── data/                             # 原始資料（未納入版控）
 │   ├── mHealth_subject1.log
 │   ├── ...
 │   ├── mHealth_subject10.log
 │   └── data_raw_Info.md              # 資料集規格說明
 │
 ├── models/                           # 已訓練模型存放
+│   ├── clinical_rehab_model_v1.keras # Generation 1 歷史模型（保留供追溯）
 │   └── clinical_rehab_model_v3.keras # Generation 4 當前模型
 │
-├── architecture/                     # 架構圖與評估視覺化
-│   └── confusion_matrix/
-│       ├── confusion_matrix_v3_multi.png        # Generation 2 混淆矩陣
-│       ├── confusion_matrix_v3_1_multi.png      # Generation 2.1 混淆矩陣
-│       ├── S2_Confusion_Matrix_FFT_Acc.png      # Generation 3 S2 混淆矩陣
-│       └── S2_Confusion_Matrix_FFT_Acc_0.78.png
-│
-├── Spec/                             # 技術規格存檔
-│   └── v3_1_multi_Technical_Spec.md
+├── confusion_matrix/                 # 評估視覺化
+│   ├── confusion_matrix_v3_multi.png            # Generation 2 混淆矩陣
+│   ├── confusion_matrix_v3_1_multi.png          # Generation 2.1 混淆矩陣
+│   ├── S2_Confusion_Matrix_FFT_Acc.png          # Generation 3 S2 混淆矩陣
+│   └── S2_Confusion_Matrix_FFT_Acc_0.78.png
 │
 ├── docs/                             # 參考文獻（醫療法規、SaMD）
 │
@@ -250,6 +285,8 @@ AI-Clinical-Rehab-Platform/
 ├── ARCHITECTURE.md                   # 系統架構（本文件）
 ├── SPEC.md                           # 技術規格與實作準則
 ├── CHANGELOG.md                      # 版本更新日誌
+├── ROADMAP.md                        # 交接說明書與研發計畫
+└── Development_Log.md                # 研發歷程紀錄（決策脈絡）
 ```
 
 ---
@@ -265,9 +302,13 @@ AI-Clinical-Rehab-Platform/
 - **Stage 6 — DTW 演算法優化**：`RealTimeBiofeedbackEngine.calculate_similarity()` 改用 Dynamic Time Warping（DTW，Sakoe-Chiba band）取代歐幾里德距離，解決動作節奏過於敏感的問題；因 DTW 距離恆 ≤ 原歐幾里德距離，評分公式與門檻無需重新校準。
 - **Stage 7 — 即時資料橋接**：新增 `ui_bridge.py`（WebSocket 伺服器）與 `frontend/demo.html`（最小展示前端），將 `RealTimeBiofeedbackEngine` 的即時決策結果（`ui_color`、`final_score` 等）推播給前端顯示，驗證後端到前端的串接管線。
 
-### 近期（Stage 8，進行中）
+- **Stage 8 A/D/F — 臨床串流防護與測試基礎建設**：品質閘門補上 NaN/Inf fail-safe（原本 `NaN < 門檻` 恆為 False，髒數據可直接穿透至模型）；`RealTimeStreamProcessor` 新增影格驗證、緩衝區復原與健康度統計；建立首套自動化回歸測試（72 項），並以突變測試驗證其鑑別力。
 
-- **最終壓力測試與交付**：長時間循環運行全量受試者數據，測試 `RealTimeStreamProcessor` 緩衝區穩定性；補強例外與錯誤處理；整理正式部署文件。
+### 近期（Stage 8 剩餘，進行中）
+
+- **B — 推論阻塞 event loop**：`model.predict()` 為同步呼叫，跑在 asyncio 主迴圈上，每次推論會凍結整個 WebSocket 伺服器。規劃以 `asyncio.to_thread()` 隔離。
+- **C — 推論記憶體成長**：`model.predict()` 在迴圈中重複呼叫會累積 function trace。規劃改用 `model(input_data, training=False)`。
+- **E — 壓力測試與交付**：長時間循環運行全量受試者數據，以 `get_health_stats()` 監控 `RealTimeStreamProcessor` 緩衝區穩定性；整理正式部署文件。
 
 ### 中期（產品化）
 

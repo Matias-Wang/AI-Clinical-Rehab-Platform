@@ -76,6 +76,34 @@ python main.py
 
 > 歷史實驗訓練ipynb檔存放於 `development_history/`。
 
+### 啟動即時生物回饋展示
+
+```bash
+# 啟動 WebSocket 橋接伺服器（預設 S10、埠 8765、20 倍速）
+python ui_bridge.py --subject 10 --port 8765 --speed 20
+
+# 伺服器啟動後，以瀏覽器開啟 frontend/demo.html 觀看即時紅/黃/綠燈號
+```
+
+| 參數 | 說明 | 預設值 |
+|------|------|--------|
+| `--subject` | 模擬串流的受試者編號 | 10 |
+| `--port` | WebSocket 監聽埠 | 8765 |
+| `--speed` | 播放加速倍率 | 20.0 |
+| `--realtime` | 以真實 50Hz 播放（等同 `--speed 1.0`） | — |
+
+### 執行回歸測試
+
+```bash
+# 全套測試（72 項，含需要 TensorFlow 的準確率基準）
+pytest
+
+# 僅快速測試（約 3 秒，免載入 TensorFlow）
+pytest -m "not slow"
+```
+
+測試涵蓋 Fix 1/2/3 等致命修正的回歸保護、品質閘門的 NaN fail-safe、串流緩衝區復原與 DTW 數學性質。修改預處理管線或推論路徑後，測試必須維持全綠。
+
 ---
 
 ## 目標使用者
@@ -97,8 +125,11 @@ python main.py
 - **選擇性標準化**：前 4 維（Acc/Mag）執行受試者級別 Z-score；後 3 維（Gravity）執行全局縮放（÷10），保留物理角度參考值。
 - **LOSO 交叉驗證**：按受試者分割訓練/測試集，模擬臨床部署情境。
 - **臨床品質閘門 (Clinical Quality Gate)**：`ClinicalQualityGate` 類別，基於 Grav_Y 變異數閾值（≥ 0.0005）攔截低品質動作資料，防止治療師集群效應（Therapist Clustering）導致的偽陽性。採 Data-Centric AI 路線，取代後端數學補償策略。
-- **即時串流處理器 (RealTimeStreamProcessor)**：`schema.py` 內建支援 50% 重疊率（Stride=64）的滑動視窗緩衝區，模擬穿戴裝置即時數據流。
-- **即時生物回饋引擎 (RealTimeBiofeedbackEngine)**：整合品質閘門與歐幾里德相似度評分的即時決策中心，輸出 紅/黃/綠 三色 UI 引導狀態。
+- **即時串流處理器 (RealTimeStreamProcessor)**：`schema.py` 內建支援 50% 重疊率（Stride=64）的滑動視窗緩衝區，模擬穿戴裝置即時數據流。內建影格完整性驗證與緩衝區復原機制，攔截 NaN/Inf、維度錯誤與硬體雜訊，並在連續髒數據時判定感測器斷訊。
+- **即時生物回饋引擎 (RealTimeBiofeedbackEngine)**：整合品質閘門與 DTW 相似度評分的即時決策中心，輸出 紅/黃/綠 三色 UI 引導狀態。
+- **DTW 姿態相似度**：以 Dynamic Time Warping（Sakoe-Chiba band，radius=16）取代點對點的歐幾里德距離，容忍動作節奏差異——姿勢正確但速度略慢的患者不再被誤判為做錯。
+- **即時資料橋接 (WebSocket)**：`ui_bridge.py` 將推論結果即時 broadcast 給前端，`frontend/demo.html` 提供無框架的最小展示頁面。
+- **自動化回歸測試**：`tests/` 提供 72 項測試，釘死 Fix 1/2/3 等致命修正，並以突變測試驗證測試本身的鑑別力。
 
 ### 實驗筆記本
 
@@ -118,28 +149,36 @@ python main.py
 AI-Clinical-Rehab-Platform/
 ├── schema.py                              # 核心管線（特徵工程、品質閘門、即時引擎）
 ├── main.py                                # 系統主入口（單次/批量驗收測試）
+├── ui_bridge.py                           # WebSocket 即時資料橋接伺服器
+├── console.py                             # UTF-8 輸出設定（避免 cp950 編碼崩潰）
 ├── requirements.txt                       # 依賴套件清單
+├── pytest.ini                             # 測試設定
 │
-├── data/                                  # mHealth Dataset 原始資料
+├── tests/                                 # 自動化回歸測試（72 項）
+│
+├── frontend/                              # 最小展示前端
+│   └── demo.html                          # 自包含 HTML/JS，顯示即時燈號與評分
+│
+├── data/                                  # mHealth Dataset 原始資料（未納入版控）
 │   ├── mHealth_subject1.log ~ subject10.log
 │   └── data_raw_Info.md                   # 資料集說明文件
 │
 ├── models/                                # 訓練完成的模型檔案
+│   ├── clinical_rehab_model_v1.keras      # Generation 1 歷史模型（保留供追溯）
 │   └── clinical_rehab_model_v3.keras      # Generation 4 當前模型
 │
-├── architecture/                          # 架構圖與評估結果
-│   └── confusion_matrix/                  # 混淆矩陣圖
-│
-├── Spec/                                  # 技術規格文件
-│   └── v3_1_multi_Technical_Spec.md
+├── confusion_matrix/                      # 混淆矩陣圖
 │
 ├── docs/                                  # 參考文獻（SaMD、AI 醫療法規）
 │
+├── development_history/                   # 歷史實驗 Notebook（未納入版控）
 │
 ├── README.md
 ├── ARCHITECTURE.md
 ├── SPEC.md
 ├── CHANGELOG.md
+├── ROADMAP.md                             # 交接說明書與研發計畫
+└── Development_Log.md                     # 研發歷程紀錄
 ```
 
 ---

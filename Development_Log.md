@@ -148,3 +148,135 @@ UI 顏色狀態設計：定義紅、黃、綠三色引導邏輯，並成功驗�
 5. 技術規格變動 (SPEC.md Update)
     - 更新 8.5 節：定義姿勢相似度演算法與公式。
     - 更新 8.6 節：正式納入 UI 顏色狀態設計與臨床提示訊息準則。
+
+##  2026/07/11  研發歷程紀錄：演算法魯棒性優化（Stage 6 — DTW 相似度）
+### 1. 核心問題識別
+- 現象紀錄：舊版動作相似度比對採用歐幾里德距離，屬點對點的剛性計算。受試者只要節奏或速度與 S10 黃金範本相差約 0.05 秒，分數即暴跌並誤觸黃燈（🟡）。
+- 臨床意涵：此類誤判懲罰的是「節奏差異」而非「姿勢錯誤」，與復健生物回饋的目的相悖——動作正確但速度略慢的患者不應被系統判定為做錯。
+
+### 2. 技術決策與實作
+- 新增 `dtw_distance(seq_a, seq_b, radius=16)`：純 numpy 手刻 DTW，採 Sakoe-Chiba band 限制（radius=16 samples ≈ 0.32 秒 @ 50Hz），local cost 取平方差、最終距離開根號，與原歐幾里德距離維持同一尺度。
+- `RealTimeBiofeedbackEngine.calculate_similarity()` 改用 `dtw_distance()` 取代 `np.linalg.norm()`；`__init__()` 新增可調參數 `dtw_radius`（預設 16）。
+
+### 3. 免重新校準的理由（關鍵設計決策）
+- 對角線路徑恆為 DTW 搜尋空間中的合法解，故 DTW 距離恆 ≤ 對應的歐幾里德距離。
+- 由此推得評分公式的 `× 15` 係數與 GREEN/YELLOW 門檻皆無需重新校準，`ClinicalQualityGate` 完全未動。此性質讓 Stage 5 的批量驗收數字得以直接沿用，避免整套臨床門檻重新驗證的成本。
+
+### 4. 驗證與未竟事項
+- 已執行 `python main.py` 端到端測試，S01–S04 合格率仍明顯低於 S10，攔截行為與 Stage 5 基準一致。
+- 尚未涵蓋：多標籤模型適配性測試。Label 7（手臂前舉）以外的其他復健動作標籤，其即時推論與相似度比對尚未驗證。
+
+##  2026/07/11  研發歷程紀錄：系統整合與 UI 橋接（Stage 7）
+### 1. 核心問題識別
+- 系統輸出（品質報告、AI 預測、相似度分數）僅能在終端機以文字呈現，未與任何前端畫面接軌，無法作為真正的「生物回饋」介面。
+
+### 2. 技術實作
+- 新增 `ui_bridge.py`：以 `asyncio` + `websockets` 建立 WebSocket 伺服器（預設埠 8765），模擬指定受試者的逐幀串流，並將每個視窗的推論結果即時 broadcast 給所有已連線 client（JSON 格式，見 SPEC.md §9.5）。支援 `--subject`／`--port`／`--speed`／`--realtime` 參數。
+- 設計原則：完全重用 `schema.py` 既有的 `load_and_preprocess_subject`、`ClinicalQualityGate`、`RealTimeBiofeedbackEngine`、`ACTIVITY_LABELS`，不修改任何既有推論邏輯，確保橋接層不引入行為偏移。
+- 新增 `frontend/demo.html`：自包含 HTML/JS 最小展示前端（無框架、無 build tooling），以瀏覽器原生 WebSocket API 連線，顯示紅/黃/綠燈號與 final_score／similarity／AI 辨識動作。
+- 依賴新增 `websockets`（寫入 `requirements.txt`，保留其原有 UTF-16 編碼）。
+
+### 3. 驗證項目
+- 伺服器啟動流程（STEP 1–4）正常。
+- 單一 client 收發正常；雙 client 同時連線收到相同 broadcast。
+- client 異常斷線時伺服器不崩潰，並正確清理連線集合。
+- `python main.py` 既有驗收流程不受影響。
+
+### 4. 尚未涵蓋
+- 正式的 3D 前端視覺組件（`demo.html` 僅為驗證串接用的 2D 展示頁）。
+- 50Hz 真實速率下的長時間延遲與穩定性壓力測試（留待 Stage 8）。
+
+##  2026/07/12  研發歷程紀錄：訓練與推論一致性重大修復（Fix 3）
+本次為專案至今最隱蔽的一個 Bug，紀錄重點在於「如何被發現」而非僅是「如何修復」。
+
+### 1. 現象
+- 模型從未預測過 Label 1、5、6、7——12 類中有 4 類完全消失。
+- 真實 Label 7 視窗有 98% 以上被誤判為 Label 10。
+- `main.py` 報告中的「AI 辨識 L7 次數」因此恆為 0，而 Label 7 正是黃金範本所使用的動作。
+
+### 2. 根因
+對照訓練用 notebook（`development_history/20260404_Project_Rehab_Optimization.ipynb`）逐步比對後，發現 `load_and_preprocess_subject()` 遺漏兩個關鍵步驟：
+1. Acc_X/Y/Z/Magnitude 的**受試者級 `StandardScaler` Z-score**。
+2. FFT 能量的 `log1p(x) / 5.0` 縮放。
+
+兩者都只存在於 SPEC.md 與訓練 notebook 的文件記載中，Week 5 產品化遷移時未真正落實到程式碼——典型的 Train/Serving Skew。
+
+### 3. 順序陷阱（本次最重要的教訓）
+- FFT 能量必須以**原始尺度**的 Magnitude 計算，因此 Z-score 一定要排在 FFT 廣播**之後**。
+- 實驗中曾將順序顛倒（Z-score 排在 FFT 之前），結果整體準確率反而崩落至約 5–48%。
+- 危險之處在於：顛倒版本「看起來像修好了」（4 個消失的類別確實重新出現），實際上比修復前更糟。**唯一能揭穿它的是對照 notebook 的基準準確率（S10=0.9029、S02=0.8430）**。
+- 結論：涉及特徵管線的修復，必須以數值基準而非「現象消失」作為驗收標準。
+
+### 4. 修復內容
+- `load_and_preprocess_subject()` 補回正確順序的 Z-score 與 FFT 縮放。
+- `extract_window_fft_energy()` 回傳值已含 `log1p / 5.0` 縮放。
+- 新增 `extract_golden_template(X, y, target_label=7)`，修正 `main.py`／`ui_bridge.py` 原本直接取 `X[0]` 當黃金範本的問題（`X[0]` 未必是 Label 7 動作）。
+
+### 5. 修復後驗證
+
+| 受試者 | 準確率 | 與 notebook 記錄 |
+|--------|--------|------------------|
+| S02 | 0.8430 | 完全吻合 |
+| S07 | 0.9045 | 完全吻合 |
+| S09 | 0.9065 | 完全吻合 |
+| S10 | 0.9029 | 完全吻合 |
+
+全受試者平均準確率回復至 92.6%。
+
+### 6. 影響範圍與已知限制
+- 僅影響 Acc/Mag 與 FFT 兩條特徵路徑；`ClinicalQualityGate`（Grav_Y）與 Stage 6 的 DTW 相似度計算使用獨立路徑，不受影響，Stage 5–7 的品質閘門驗收數字維持有效。
+- 已知限制：Z-score 為受試者級統計量，需該受試者完整視窗集合才能計算，僅適用於目前「預先載入整個受試者、重播模擬即時串流」的架構。若未來接上真正逐筆即時的穿戴式硬體，需另外設計線上／滾動標準化策略。
+
+##  2026/08/30  研發歷程紀錄：臨床串流防護、緩衝區復原與測試基礎建設（Stage 8 — A/D/F）
+Stage 8 依風險排序拆為 A（髒數據防護）、B（推論阻塞）、C（記憶體成長）、D（緩衝區復原）、F（回歸測試）。本次完成 A、D、F 三項——此三項互相咬合且屬臨床安全層級，優先於效能議題。
+
+### 1. 髒數據防護（A）
+- **核心問題**：`ClinicalQualityGate.get_quality_report()` 缺少 NaN 防護。當感測器噪音產生 NaN 時 `var_y` 為 NaN，而 `NaN < MIN_SAFE_LIMIT` 在 IEEE 754 下**恆為 False**，導致髒數據被判定為「品質良好」並直接送入模型推論——品質閘門在最需要攔截的情況下完全失效。
+- 品質閘門新增 `np.isfinite(var_y)` 檢查，採 fail-safe 原則：無法判定品質時一律攔截。
+- 新增 `RealTimeStreamProcessor.validate_frame()`，於影格進入緩衝區**之前**攔截維度錯誤、NaN/Inf、非數值型別與超出生理範圍的資料。
+- 新增 `SensorStreamError` / `DirtyFrameError` / `SensorDisconnectedError` 例外階層；連續 25 幀髒數據（0.5 秒 @ 50Hz）升級判定為感測器斷訊。
+- **設計要點**：邊界檢查採**標準化後尺度**（Z-score 50 個標準差），而非沿用文件中的 50 m/s² 原始物理門檻。原因是進入串流處理器的資料已經過 `load_and_preprocess_subject()` 標準化（Acc/Mag 為 Z-score、Grav 已 ÷10.0、FFT 已 log1p/5.0），若沿用原始物理門檻，該檢查將完全失效。
+
+### 2. 緩衝區復原（D）
+- **核心問題**：髒影格一旦進入 `deque`，後續最多 `window_size`（128）步的視窗都會沿用被污染的緩衝，系統會輸出「看起來正常但基於污染資料」的評分。原 `ui_bridge.py` 的例外處理只印出錯誤就繼續，造成例外的資料仍殘留在緩衝區內。
+- 新增 `reset_buffer()`，攔截髒影格時同步清空 deque 與步長計數器，強制重新累積完整的乾淨視窗。
+- `process_live_frame()` 將例外轉為紅燈結果而非向外拋出，使長時間串流不因單一壞封包而中斷；並僅在「乾淨→髒」的狀態轉換點輸出，避免雜訊期間的洪水式推播。
+- `ui_bridge.py` 的 except 區塊補上 `engine.reset_buffer()`。
+- 結果新增 `reason` 欄位（`OK` / `LOW_QUALITY` / `DIRTY_DATA` / `DISCONNECTED`），`status` 維持原值，因此 `main.py` 與 `demo.html` 無需任何改動。
+- 新增 `get_health_stats()`，回傳總影格數、髒數據比例、緩衝區重置次數等指標，供後續長時間壓力測試監控使用。
+
+### 3. 回歸測試基礎建設（F）
+- 專案在此之前**沒有任何自動化測試**。Fix 2、Fix 3 這類致命修正僅存在於文件記載，缺乏程式碼層級的保護。
+- 新增 `tests/`，共 72 項測試，涵蓋預處理修正、品質閘門、串流處理器、DTW 數學性質、引擎狀態機與模型準確率基準。
+- **Fix 3 順序陷阱的精確不變量**：本次找到一個免載入 TensorFlow 即可攔截順序錯誤的判定方式——若 Z-score 被誤排到 FFT 之前，儲存於第 7 欄的能量值會「恰好等於」以最終輸出（已標準化）的 Magnitude 重算的結果。直接斷言兩者必須不同，即可在 3 秒內攔截 ROADMAP 記載「必須靠 notebook 基準準確率才抓得出來」的 Bug。
+- **準確率基準測試**標記為 `slow`，對照訓練 notebook 的 S02／S07／S09／S10 數值，缺少 TensorFlow 或模型檔時自動 skip。
+
+### 4. 突變測試驗證（測試品質的驗收）
+通過但無法失敗的測試沒有價值。逐一將四個已修復的回歸重新注入程式碼，確認測試如實失敗：
+
+| 注入的回歸 | 失敗測試數 |
+|-------------|------------|
+| 移除 Fix 2 的重力 ÷10.0 | 2 |
+| Z-score 提前至 FFT 之前 | 7（快速測試與準確率基準雙層攔截）|
+| 移除品質閘門 NaN 防護 | 4 |
+| 移除髒影格緩衝區清空 | 3 |
+
+### 5. cp950 輸出編碼修正
+- **現象**：`python main.py > out.log` 會在印出第一位受試者結果時崩潰（`UnicodeEncodeError: 'cp950' codec can't encode character`），批量驗收報告因此永遠無法完整輸出。
+- **根因**：Windows 繁中環境 locale 預設為 cp950。標準輸出被重導至管道或檔案時，stdout 不再是主控台而退回 locale 編碼，訊息中的 ✅、⚠️、❌、🔌 等字元無法編碼。掃描後確認問題橫跨 `main.py`、`inference_test.py` 與 `schema.py` 三處；`schema.py` 的字元位於品質閘門與斷訊訊息中，會一路送到前端燈號顯示，因此不能以「移除 emoji」的方式解決。
+- **修復**：新增 `console.py` 提供 `enable_utf8_output()`，於各入口點將 stdout/stderr 設為 UTF-8。直接在主控台執行時 Python 本就使用 Windows Unicode API，此設定為無害的 no-op；被重導時才生效。另加上 `errors="replace"` 作為第二道保險。回歸測試以子行程強制 `PYTHONIOENCODING=cp950` 重現，並含對照組證明測試具鑑別力。
+
+### 6. 專案維護
+- 刪除 `inference_test.py`：呼叫 `RealTimeBiofeedbackEngine` 時缺少 `model` 參數，已無法執行；其驗證範圍由 `tests/test_biofeedback_engine.py` 涵蓋。
+- Git 歷史瘦身：217MB 的 `data_raw/` 資料集曾被 commit 進版控，雖已於先前移除工作區檔案，blob 仍留在歷史中使 `.git` 達 95MB。以 `git filter-repo` 清除後降至 **7.7MB**，21 個 commit 全數保留。操作前建立完整 bundle 備份並實測還原。
+
+### 7. 驗收確認
+- `python main.py` 端到端通過，Stage 5 品質合格率完全保留（S01=3.5%、S02=5.1%、S03=16.5%、S04=15.1%、S10=20.6%）。
+- `ui_bridge.py` 實測 WebSocket 連線，正常推播含 `reason` 欄位的結果。
+- 全套 72 項測試通過。
+
+### 8. 後續（Stage 8 剩餘）
+- **B — 推論阻塞 event loop**：`model.predict()` 為同步呼叫，跑在 asyncio 主迴圈上，每次推論會凍結整個 WebSocket 伺服器。規劃以 `asyncio.to_thread()` 隔離。
+- **C — 記憶體成長**：`model.predict()` 在迴圈中重複呼叫會累積 function trace，為已知的記憶體成長來源。規劃改用 `model(input_data, training=False)`。
+- **壓力測試腳本**：長時間循環全量 S1–S10，以 `get_health_stats()` 監控緩衝區穩定性。
+- **交付文件**：部署指南與技術白皮書。

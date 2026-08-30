@@ -172,23 +172,37 @@ Input Shape: (128, 4)   ← Generation 2 之前；Generation 3 為 (128, 8)
 | 方法 | 用途 | 輸入 | 輸出 |
 |------|------|------|------|
 | `__init__(golden_template)` | 初始化，設定黃金標準範本（建議使用 S10） | ndarray (128, 8) | — |
-| `get_quality_report(X_window)` | 評估單視窗品質，回傳評分與通過/攔截判定 | ndarray (128, 8) | dict（含 score、passed、grav_y_var） |
+| `get_quality_report(X_window)` | 評估單視窗品質。含 Stage 8 的 NaN/Inf fail-safe：`var_y` 非有限值時一律攔截 | ndarray (128, 8) 或 (N, 128, 8) | tuple `(is_valid: bool, score: float, msg: str)` |
 
-### `RealTimeStreamProcessor` 類別（Stage 5 新增）
+### `RealTimeStreamProcessor` 類別（Stage 5 新增，Stage 8 擴充）
 
 | 方法 | 用途 | 輸入 | 輸出 |
 |------|------|------|------|
-| `__init__(window_size, stride)` | 初始化滑動視窗緩衝區（預設 window=128, stride=64，即 50% 重疊） | int, int | — |
-| `add_sample(sample)` | 新增單筆感測器原始樣本至緩衝區 | ndarray (8,) | — |
-| `get_window()` | 當緩衝區滿足視窗大小時，回傳當前視窗並依 stride 滑動 | — | ndarray (128, 8) 或 None |
+| `__init__(window_size, stride, sanity_abs_limit, disconnect_dirty_frames)` | 初始化滑動視窗緩衝區（預設 window=128、stride=64，即 50% 重疊）與 Stage 8 防護參數 | int, int, float, int | — |
+| `push_data(sensor_row)` | 驗證並推入單一時間步資料；達步長且緩衝已滿時回傳視窗 | ndarray (8,) | tuple `(ready: bool, window: ndarray (128, 8) \| None)` |
+| `validate_frame(sensor_row)` | 檢查影格完整性（Stage 8） | array_like | ndarray (8,) float64，失敗則拋 `DirtyFrameError` |
+| `reset_buffer()` | 清空緩衝區與步長計數器（Stage 8） | — | — |
+| `get_health_stats()` | 串流健康度統計（Stage 8） | — | dict（`total_frames`、`dirty_frames`、`dirty_ratio`、`buffer_resets`、`consecutive_dirty`、`buffer_len`） |
 
 ### `RealTimeBiofeedbackEngine` 類別（Stage 5 新增）
 
 | 方法 | 用途 | 輸入 | 輸出 |
 |------|------|------|------|
-| `__init__(model_path, golden_template)` | 載入 Keras 模型，初始化品質閘門與黃金範本 | str, ndarray (128, 8) | — |
-| `process_window(X_window)` | 對單視窗執行品質評估、AI 推論、相似度評分，回傳完整決策結果 | ndarray (128, 8) | dict（含 status、final_score、quality_score、similarity_score、prediction） |
-| `calculate_similarity(X_window)` | 計算與黃金範本的姿勢相似度評分（Stage 6 起：DTW，Sakoe-Chiba band） | ndarray (128, 8) | float（0–100） |
+| `__init__(quality_gate, golden_template, model, window_size, stride, dtw_radius)` | 注入已建立的品質閘門、黃金範本與 Keras 模型（模型由呼叫端載入，非傳入路徑） | `ClinicalQualityGate`, ndarray (128, 8), Keras model, int, int, int | — |
+| `process_live_frame(new_frame)` | 逐幀推入；湊滿視窗時執行品質評估、AI 推論與相似度評分 | ndarray (8,) | dict 或 `None`（視窗未湊滿時） |
+| `calculate_similarity(current_window)` | 計算與黃金範本 Grav_Y 的姿勢相似度評分（Stage 6 起：DTW，Sakoe-Chiba band） | ndarray (128, 8) | float（0–100） |
+
+`process_live_frame()` 回傳 dict 的欄位為 `status`、`ui_color`、`msg`、`score`、`similarity`、`predict_label`、`reason`（詳見 9.5 節）。
+
+### 串流例外階層（Stage 8 新增）
+
+| 例外 | 觸發時機 |
+|------|----------|
+| `SensorStreamError` | 所有串流層例外的基底類別 |
+| `DirtyFrameError` | 單一影格未通過 `validate_frame()`：維度錯誤、NaN/Inf、非數值型別，或數值超出 `SANITY_ABS_LIMIT` |
+| `SensorDisconnectedError` | 連續髒影格數達 `DISCONNECT_DIRTY_FRAMES`（預設 25，即 0.5 秒 @ 50Hz） |
+
+`process_live_frame()` 會攔截上述例外並轉為紅燈結果（`status="HALT"`），不向外拋出，確保長時間串流不因單一壞封包而中斷。
 
 ---
 
@@ -350,6 +364,7 @@ class ClinicalQualityGate:
   "similarity": 37.14,
   "predict_label": 4,
   "predict_label_name": "Walking",
+  "reason": "OK",
   "subject_id": 10,
   "frame_index": 506
 }
@@ -364,9 +379,12 @@ class ClinicalQualityGate:
 | `similarity` | float | 姿態相似度評分（DTW，見 8.5 節） |
 | `predict_label` | int \| null | 模型預測標籤（`HALT` 時為 `null`） |
 | `predict_label_name` | string \| null | 由 `ACTIVITY_LABELS` 查得的中文動作名稱 |
+| `reason` | string | 攔截／通過原因（Stage 8 新增）：`OK`、`LOW_QUALITY`、`DIRTY_DATA`、`DISCONNECTED` |
 | `subject_id` | int | 目前模擬串流的受試者編號 |
 | `frame_index` | int | 視窗序號，每次重播歸零 |
 
 ### 9.6 錯誤處理
 
-單一 client 的連線例外（如非正常關閉、無 close frame）僅記錄該 client 並從連線集合移除，不影響伺服器與其他 client 的運作（見 `handle_client()`）。
+- **Client 連線例外**：單一 client 的連線例外（如非正常關閉、無 close frame）僅記錄該 client 並從連線集合移除，不影響伺服器與其他 client 的運作（見 `handle_client()`）。
+- **串流例外（Stage 8）**：`stream_subject()` 的 except 區塊在印出錯誤後會呼叫 `engine.reset_buffer()`。若不清空，造成例外的資料仍殘留於 deque 中，後續最多 `window_size`（128）步的視窗都會沿用被污染的緩衝，系統將輸出「看起來正常但基於污染資料」的評分。
+- **輸出編碼（Stage 8）**：入口點於任何輸出前呼叫 `console.enable_utf8_output()`。Windows 繁中環境 locale 為 cp950，stdout 被重導至管道或檔案時會退回 locale 編碼，訊息中的 emoji 將觸發 `UnicodeEncodeError` 使程式中斷。
