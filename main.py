@@ -1,4 +1,9 @@
 # main.py (Week 5 最終驗收報告版)
+# Stage 8：必須先設定 UTF-8 輸出，避免輸出被重導時因 cp950 而崩潰
+from console import enable_utf8_output
+
+enable_utf8_output()
+
 from tensorflow.keras.models import load_model
 from schema import (
     load_and_preprocess_subject,

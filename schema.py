@@ -36,6 +36,16 @@ PHYSICAL_CONSTANTS = {
 "SAMPLING_RATE_HZ": 50
 }
 
+# Stage 8：即時串流防護參數
+# 注意：進入 RealTimeStreamProcessor 的資料已經過 load_and_preprocess_subject()
+# 標準化（Acc/Mag 為受試者級 Z-score、Grav 已 ÷10.0、FFT 已 log1p/5.0），
+# 因此此處的邊界檢查採「標準化後尺度」，不可沿用 50 m/s² 這類原始物理門檻。
+STREAM_GUARD = {
+"N_FEATURES": 8,          # 標準 8D 特徵軸數量，維度不符即視為髒數據
+"SANITY_ABS_LIMIT": 50.0,  # Z-score 達 50 個標準差在生理上不可能，判定為硬體雜訊
+"DISCONNECT_DIRTY_FRAMES": 25  # 連續 25 幀髒數據（0.5 秒 @50Hz）判定為感測器斷訊
+}
+
 """
 數據稽核清單：
 靜止重力門檻 (9.0 到 11.0)：正常靜止，可以用來校準感測器。
@@ -108,7 +118,7 @@ def create_sliding_windows_with_indices(
 # ==========================================================================
 # 基本單一受試者資料讀取函數
 # ==========================================================================
-def load_mhealth_subject(subject_id, folder_path='data_raw'):
+def load_mhealth_subject(subject_id, folder_path='data'):
     """原子化讀取：負責最基礎的檔案讀取與錯誤檢查"""
     filename = f"mHealth_subject{subject_id}.log"
     file_path = os.path.join(folder_path, filename)
@@ -124,7 +134,7 @@ def load_mhealth_subject(subject_id, folder_path='data_raw'):
 # ==========================================================================
 # 2. 單一受試者處理管線
 # ==========================================================================
-def load_and_preprocess_subject(subject_id, folder_path='data_raw'):
+def load_and_preprocess_subject(subject_id, folder_path='data'):
     """診斷專用：回傳 (X, y)，並包含物理濾鏡清洗邏輯。
     修改紀錄：
         - 2026/03/07：
@@ -232,7 +242,7 @@ def get_all_subjects_for_analysis(folder_path='data'):
 # ==========================================================================
 # 最終整合入口
 # ==========================================================================
-def get_final_training_data(folder_path='data_raw'):
+def get_final_training_data(folder_path='data'):
     """
     任務 B：模型訓練專用。
     回傳合併後的 X_final, y_final (與你原本的 code 產出一致)。
@@ -397,6 +407,22 @@ def extract_golden_template(X, y, target_label=7):
 import numpy as np
 from collections import deque
 
+
+# ==========================================================================
+# Stage 8：臨床串流例外型別
+# ==========================================================================
+class SensorStreamError(Exception):
+    """所有即時串流層例外的基底類別。"""
+
+
+class DirtyFrameError(SensorStreamError):
+    """單一影格未通過完整性檢查（NaN／Inf／維度錯誤／數值超出生理範圍）。"""
+
+
+class SensorDisconnectedError(SensorStreamError):
+    """連續髒影格數超過門檻，判定感測器已斷訊。"""
+
+
 # --- Week 4: 臨床品質閘門 (Generation 4) ---
 class ClinicalQualityGate:
     def __init__(self, golden_template):
@@ -413,7 +439,14 @@ class ClinicalQualityGate:
             var_y = np.mean(np.var(X_window[:, :, 5], axis=1))
         else:
             var_y = np.var(X_window[:, 5])
-        
+
+        # Stage 8 修正：NaN/Inf 防護（fail-safe）。
+        # 原本缺少此檢查時，含 NaN 的視窗會使 var_y 變成 NaN，而
+        # `NaN < MIN_SAFE_LIMIT` 恆為 False，導致髒數據被判定為「品質良好」
+        # 並直接送入模型推論。臨床上必須採取「寧可不輸出，也不輸出錯誤結果」。
+        if not np.isfinite(var_y):
+            return False, 0.0, "⚠️ 訊號含無效值 (NaN/Inf)，AI 停止預測。"
+
         if var_y < self.MIN_SAFE_LIMIT:
             score = (var_y / self.MIN_SAFE_LIMIT) * 60
             return False, score, "⚠️ 動作幅度嚴重不足，AI 停止預測。"
@@ -426,24 +459,145 @@ class ClinicalQualityGate:
 # 即時數據處理
 # ==========================================================================
 class RealTimeStreamProcessor:
-    def __init__(self, window_size=128, stride=64):
+    """滑動視窗緩衝區，含 Stage 8 的髒數據攔截與緩衝區復原機制。"""
+
+    def __init__(
+        self,
+        window_size: int = 128,
+        stride: int = 64,
+        sanity_abs_limit: float = STREAM_GUARD["SANITY_ABS_LIMIT"],
+        disconnect_dirty_frames: int = STREAM_GUARD["DISCONNECT_DIRTY_FRAMES"],
+    ) -> None:
+        """初始化緩衝區與防護統計量。
+
+        Parameters
+        ----------
+        window_size : int
+            視窗長度（時間步數），預設 128。
+        stride : int
+            視窗輸出步長，預設 64（50% 重疊）。
+        sanity_abs_limit : float
+            標準化尺度下的絕對值上限，超過即判定為硬體雜訊。
+        disconnect_dirty_frames : int
+            連續髒影格達此數量時判定為感測器斷訊。
+        """
         self.window_size = window_size
         self.stride = stride
+        self.sanity_abs_limit = sanity_abs_limit
+        self.disconnect_dirty_frames = disconnect_dirty_frames
         self.buffer = deque(maxlen=window_size)
         self.new_data_counter = 0
+
+        # Stage 8：串流健康度統計（供壓力測試與運維監控使用）
+        self.total_frames = 0
+        self.dirty_frames = 0
+        self.consecutive_dirty = 0
+        self.buffer_resets = 0
+
+    def validate_frame(self, sensor_row) -> np.ndarray:
+        """檢查單一影格的完整性，通過則回傳標準化後的 float64 陣列。
+
+        Parameters
+        ----------
+        sensor_row : array_like
+            單一時間步的感測器資料，預期長度為 8。
+
+        Returns
+        -------
+        numpy.ndarray
+            shape (8,) 的 float64 影格。
+
+        Raises
+        ------
+        DirtyFrameError
+            影格無法轉為數值、維度不符、含 NaN/Inf，或數值超出生理合理範圍。
+        """
+        try:
+            frame = np.asarray(sensor_row, dtype=np.float64)
+        except (TypeError, ValueError) as e:
+            raise DirtyFrameError(f"影格無法轉換為數值：{e}") from e
+
+        if frame.shape != (STREAM_GUARD["N_FEATURES"],):
+            raise DirtyFrameError(
+                f"影格維度錯誤：期望 ({STREAM_GUARD['N_FEATURES']},)，實得 {frame.shape}"
+            )
+
+        if not np.all(np.isfinite(frame)):
+            raise DirtyFrameError("影格含 NaN 或 Inf，判定為感測器故障或封包毀損。")
+
+        if np.any(np.abs(frame) > self.sanity_abs_limit):
+            peak = float(np.max(np.abs(frame)))
+            raise DirtyFrameError(
+                f"影格數值 {peak:.2f} 超出合理範圍 "
+                f"(|x| > {self.sanity_abs_limit})，判定為硬體雜訊。"
+            )
+
+        return frame
+
+    def reset_buffer(self) -> None:
+        """清空緩衝區與步長計數器。
+
+        Stage 8 新增：髒影格一旦進入 deque，後續最多 window_size 步的視窗都會
+        被污染。攔截到髒數據時必須丟棄整段緩衝，等待重新累積乾淨的完整視窗，
+        避免系統輸出「看起來正常但基於污染資料」的評分。
+        """
+        self.buffer.clear()
+        self.new_data_counter = 0
+        self.buffer_resets += 1
 
     def push_data(self, sensor_row):
         """
         將單一時間步的感測器數據推入緩衝區
+
+        Raises
+        ------
+        DirtyFrameError
+            影格未通過 validate_frame() 檢查，緩衝區已同步清空。
+        SensorDisconnectedError
+            連續髒影格數達到 disconnect_dirty_frames 門檻。
         """
-        self.buffer.append(sensor_row)
+        self.total_frames += 1
+
+        try:
+            frame = self.validate_frame(sensor_row)
+        except DirtyFrameError:
+            # 髒影格不入列，並清空既有緩衝以免污染後續視窗
+            self.dirty_frames += 1
+            self.consecutive_dirty += 1
+            self.reset_buffer()
+            if self.consecutive_dirty >= self.disconnect_dirty_frames:
+                raise SensorDisconnectedError(
+                    f"連續 {self.consecutive_dirty} 幀無效資料，判定感測器斷訊。"
+                ) from None
+            raise
+
+        self.consecutive_dirty = 0
+        self.buffer.append(frame)
         self.new_data_counter += 1
-        
+
         # 達到步長且緩衝區已滿，回傳視窗數據進行分析
         if self.new_data_counter >= self.stride and len(self.buffer) == self.window_size:
             self.new_data_counter = 0
             return True, np.array(self.buffer)
         return False, None
+
+    def get_health_stats(self) -> dict:
+        """回傳串流健康度統計，供壓力測試與長時間運行監控使用。
+
+        Returns
+        -------
+        dict
+            包含總影格數、髒影格數、髒數據比例、緩衝區重置次數與目前緩衝長度。
+        """
+        dirty_ratio = self.dirty_frames / self.total_frames if self.total_frames else 0.0
+        return {
+            "total_frames": self.total_frames,
+            "dirty_frames": self.dirty_frames,
+            "dirty_ratio": dirty_ratio,
+            "buffer_resets": self.buffer_resets,
+            "consecutive_dirty": self.consecutive_dirty,
+            "buffer_len": len(self.buffer),
+        }
 
 class RealTimeBiofeedbackEngine(RealTimeStreamProcessor):
     def __init__(self, quality_gate, golden_template, model, window_size=128, stride=64, dtw_radius=16):
@@ -468,10 +622,47 @@ class RealTimeBiofeedbackEngine(RealTimeStreamProcessor):
         sim_score = max(0, 100 - (distance * 15))
         return sim_score
 
+    def _build_halt_result(self, reason: str, msg: str) -> dict:
+        """組出髒數據／斷訊情境下的紅燈回傳結果。
+
+        Parameters
+        ----------
+        reason : str
+            攔截原因代碼（DIRTY_DATA 或 DISCONNECTED）。
+        msg : str
+            要顯示於前端的說明文字。
+
+        Returns
+        -------
+        dict
+            與 process_live_frame() 一致的結果格式，status 固定為 HALT。
+        """
+        return {
+            "status": "HALT",
+            "ui_color": "RED",
+            "msg": msg,
+            "score": 0.0,
+            "similarity": 0,
+            "predict_label": None,
+            "reason": reason,
+        }
+
     def process_live_frame(self, new_frame):
-        ready, window_data = self.push_data(new_frame)
+        # Stage 8：髒數據／斷訊攔截。push_data() 已在拋出例外前清空緩衝區，
+        # 此處只需將其轉為前端可理解的紅燈狀態，讓長時間串流不會因單一
+        # 壞封包而中斷。為避免雜訊期間洪水式推播，僅在「乾淨→髒」的狀態
+        # 轉換點與斷訊升級時輸出。
+        try:
+            ready, window_data = self.push_data(new_frame)
+        except SensorDisconnectedError as e:
+            return self._build_halt_result("DISCONNECTED", f"🔌 感測器斷訊：{e}")
+        except DirtyFrameError as e:
+            if self.consecutive_dirty == 1:
+                return self._build_halt_result("DIRTY_DATA", f"⚠️ 訊號異常：{e}")
+            return None
+
         if not ready: return None
-            
+
         # 1. 執行 Week 4 品質檢查
         is_valid, q_score, q_msg = self.gate.get_quality_report(window_data)
         
@@ -480,11 +671,12 @@ class RealTimeBiofeedbackEngine(RealTimeStreamProcessor):
                 "status": "HALT", 
                 "ui_color": "RED", 
                 "msg": q_msg, 
-                "score": q_score, 
-                "similarity": 0, 
-                "predict_label": None
+                "score": q_score,
+                "similarity": 0,
+                "predict_label": None,
+                "reason": "LOW_QUALITY",
             }
-            
+
         # 2. 執行 Week 3 (v3) 模型推論
         input_data = np.expand_dims(window_data, axis=0) # 符合 (1, 128, 8)
         prediction = self.model.predict(input_data, verbose=0)
@@ -502,7 +694,8 @@ class RealTimeBiofeedbackEngine(RealTimeStreamProcessor):
             "status": "PROCEED", 
             "ui_color": ui_color, 
             "msg": msg, 
-            "score": final_score, 
-            "similarity": sim_score, 
-            "predict_label": predict_label
+            "score": final_score,
+            "similarity": sim_score,
+            "predict_label": predict_label,
+            "reason": "OK",
         }

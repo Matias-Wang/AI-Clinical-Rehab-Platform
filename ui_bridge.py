@@ -5,6 +5,12 @@
 （frontend/demo.html）。
 """
 
+from console import enable_utf8_output
+
+# Stage 8：必須早於任何輸出，避免伺服器以 subprocess 啟動（stdout 為管道）
+# 時，燈號訊息中的 emoji 觸發 cp950 UnicodeEncodeError 而中斷服務。
+enable_utf8_output()
+
 import argparse
 import asyncio
 import json
@@ -84,6 +90,7 @@ def build_broadcast_payload(
         "predict_label_name": ACTIVITY_LABELS.get(int(predict_label))
         if predict_label is not None
         else None,
+        "reason": result.get("reason", "OK"),
         "subject_id": subject_id,
         "frame_index": frame_index,
     }
@@ -127,7 +134,12 @@ async def stream_subject(
                         broadcast(clients, payload)
                     frame_index += 1
             except Exception as e:
+                # Stage 8：非預期例外時必須丟棄整段緩衝區。
+                # 若只印錯誤就繼續，造成例外的資料已殘留在 deque 中，
+                # 後續最多 window_size 步的視窗都會沿用被污染的緩衝。
                 print(f"{RED}STEP 4 ERROR:{e}{RESET}")
+                engine.reset_buffer()
+                print(f"{YELLOW}STEP 4:已清空串流緩衝區，等待重新累積乾淨視窗{RESET}")
 
             await asyncio.sleep(frame_interval)
 

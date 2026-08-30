@@ -6,4 +6,5 @@ __pycache__/
 data/
 development_history/
 CLAUDE.md
-.cluadeignore
+.claudeignore
+.pytest_cache/
