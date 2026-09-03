@@ -39,6 +39,9 @@ RESET = "\033[0m"
 MODEL_PATH = "models/clinical_rehab_model_v3.keras"
 DATA_FOLDER = "data/"
 
+# 串流落後超過此秒數即重設時間軸，不再嘗試追趕（見 stream_subject()）
+MAX_CATCHUP_SECONDS = 1.0
+
 
 def parse_args() -> argparse.Namespace:
     """解析命令列參數。
@@ -50,7 +53,9 @@ def parse_args() -> argparse.Namespace:
     """
     parser = argparse.ArgumentParser(description="AI 臨床復健平台 - 即時資料橋接伺服器")
     parser.add_argument("--subject", type=int, default=10, help="模擬串流的受試者編號 (預設 10)")
-    parser.add_argument("--port", type=int, default=8765, help="WebSocket 監聽埠 (預設 8765)")
+    parser.add_argument(
+        "--port", type=int, default=8765, help="WebSocket 監聽埠 (預設 8765)"
+    )
     parser.add_argument(
         "--speed", type=float, default=20.0, help="播放加速倍率，1.0 為真實 50Hz (預設 20.0)"
     )
@@ -121,8 +126,11 @@ async def stream_subject(
     clients : set[ServerConnection]
         目前已連線的 WebSocket client 集合。
     """
+    loop = asyncio.get_running_loop()
     frame_interval = (1.0 / 50.0) / speed
     frame_index = 0
+    frames_elapsed = 0
+    timeline_start = loop.time()
 
     while True:
         for frame in flat_stream:
@@ -141,10 +149,32 @@ async def stream_subject(
                 engine.reset_buffer()
                 print(f"{YELLOW}STEP 4:已清空串流緩衝區，等待重新累積乾淨視窗{RESET}")
 
-            await asyncio.sleep(frame_interval)
+            # Stage 8 (A1)：以絕對時間軸排程，取代逐幀 sleep(frame_interval)。
+            # Windows 的 ProactorEventLoop 計時器粒度為 15.55 ms，任何小於此值
+            # 的 sleep 都會被拉長到 15.55 ms。原本逐幀 sleep 使誤差逐幀累積：
+            # --realtime 要求 20 ms/幀，實際變成 31.2 ms/幀，50 Hz 掉到 31.3 Hz，
+            # 系統比即時還慢，追不上真實感測器（Stage 8 壓力測試因此無法進行）。
+            #
+            # 改以「每幀的目標時刻」計算延遲：超前才 sleep，落後則立即處理下一幀
+            # 進行追趕。粒度誤差因此被攤平為抖動而非累積延遲，平均速率正確。
+            frames_elapsed += 1
+            delay = timeline_start + frames_elapsed * frame_interval - loop.time()
+
+            if delay > 0:
+                await asyncio.sleep(delay)
+            else:
+                # 落後時不 sleep，但仍讓出控制權，避免追趕期間餓死其他任務
+                await asyncio.sleep(0)
+
+                if delay < -MAX_CATCHUP_SECONDS:
+                    # 落後過多（系統暫停、行程被凍結等）時重設時間軸，
+                    # 避免以最高速率無止境追趕一段永遠補不回來的落差。
+                    timeline_start = loop.time() - frames_elapsed * frame_interval
 
 
-async def handle_client(connection: ServerConnection, clients: set[ServerConnection]) -> None:
+async def handle_client(
+    connection: ServerConnection, clients: set[ServerConnection]
+) -> None:
     """處理單一 WebSocket client 的連線生命週期。
 
     Parameters
@@ -197,13 +227,24 @@ async def main() -> None:
     try:
         print(f"{GREEN}STEP 3:啟動 WebSocket 伺服器於 ws://localhost:{args.port}{RESET}")
         async with serve(
-            lambda connection: handle_client(connection, clients), "localhost", args.port
+            lambda connection: handle_client(connection, clients),
+            "localhost",
+            args.port,
         ):
-            print(f"{GREEN}STEP 4:開始模擬受試者 S{args.subject:02} 即時串流 (speed={speed}x){RESET}")
+            print(
+                f"{GREEN}STEP 4:開始模擬受試者 S{args.subject:02} "
+                f"即時串流 (speed={speed}x){RESET}"
+            )
             await stream_subject(engine, flat_stream, args.subject, speed, clients)
     except Exception as e:
         print(f"{RED}STEP 3 ERROR:{e}{RESET}")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Stage 8 (A10)：Ctrl+C 原本會讓 asyncio.run() 直接拋出 KeyboardInterrupt
+    # 並印出整段 traceback。臨床展示情境下這既不美觀也讓人誤以為系統崩潰，
+    # 故改為輸出明確的關閉訊息後正常結束。
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print(f"\n{CYAN}STEP 6:收到中斷訊號，伺服器已關閉{RESET}")

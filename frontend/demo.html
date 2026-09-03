@@ -67,6 +67,7 @@
     <div><span>受試者</span><span id="val-subject">-</span></div>
     <div><span>視窗序號</span><span id="val-frame">-</span></div>
     <div><span>狀態</span><span id="val-status">-</span></div>
+    <div><span>攔截原因 (Reason)</span><span id="val-reason">-</span></div>
     <div><span>AI 辨識動作</span><span id="val-label">-</span></div>
     <div><span>綜合評分 (Final Score)</span><span id="val-score">-</span></div>
     <div><span>相似度評分 (Similarity)</span><span id="val-similarity">-</span></div>
@@ -75,6 +76,13 @@
 
   <script>
     const WS_URL = "ws://localhost:8765";
+    // Stage 8：後端以 reason 區分攔截原因，status 一律為 HALT/PROCEED
+    const REASON_TEXT = {
+      OK: "正常",
+      LOW_QUALITY: "動作幅度不足",
+      DIRTY_DATA: "訊號異常 (NaN/雜訊)",
+      DISCONNECTED: "感測器斷訊",
+    };
     const connStatusEl = document.getElementById("conn-status");
     const lightEl = document.getElementById("light");
     const msgEl = document.getElementById("msg");
@@ -82,6 +90,7 @@
       subject: document.getElementById("val-subject"),
       frame: document.getElementById("val-frame"),
       status: document.getElementById("val-status"),
+      reason: document.getElementById("val-reason"),
       label: document.getElementById("val-label"),
       score: document.getElementById("val-score"),
       similarity: document.getElementById("val-similarity"),
@@ -101,6 +110,7 @@
         fields.subject.textContent = "S" + String(data.subject_id).padStart(2, "0");
         fields.frame.textContent = data.frame_index;
         fields.status.textContent = data.status;
+        fields.reason.textContent = REASON_TEXT[data.reason] || data.reason || "-";
         fields.label.textContent = data.predict_label_name || "-";
         fields.score.textContent = data.score.toFixed(1);
         fields.similarity.textContent = data.similarity.toFixed(1);

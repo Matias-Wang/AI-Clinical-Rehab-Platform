@@ -25,8 +25,6 @@ pytestmark = pytest.mark.perf
 # 單視窗推論延遲上限（現況 2.49 ms，退回 predict() 為 94.91 ms）
 MAX_INFERENCE_MEDIAN_MS = 15.0
 
-# --realtime 應達成的最低實際取樣率（目標 50 Hz）
-MIN_REALTIME_HZ = 45.0
 
 
 @pytest.fixture(scope="module")
@@ -93,8 +91,32 @@ def test_engine_window_latency_within_budget(model, golden_template):
     )
 
 
+class _CountingEngine:
+    """僅計數的假引擎。
+
+    量測目標是 `stream_subject()` 的節奏排程，而非推論成本，
+    因此以最輕量的替身隔離出純粹的時序行為。
+    """
+
+    def __init__(self) -> None:
+        """初始化計數器。"""
+        self.count = 0
+
+    def process_live_frame(self, frame: np.ndarray) -> None:
+        """記錄收到的幀數，不做任何運算。"""
+        self.count += 1
+        return None
+
+    def reset_buffer(self) -> None:
+        """符合引擎介面，供例外處理路徑呼叫。"""
+
+
 def measure_stream_hz(speed: float, seconds: float = 6.0) -> float:
-    """量測 ui_bridge 節奏邏輯的實際幀率。
+    """量測 `ui_bridge.stream_subject()` 的實際幀率。
+
+    **必須驅動真實的 stream_subject()，不可自行重寫節奏邏輯。**
+    自行複製一份 sleep 迴圈的版本無法反映 ui_bridge 的實際行為——
+    修正 ui_bridge 的排程方式時，測試不會有任何變化。
 
     Parameters
     ----------
@@ -108,30 +130,50 @@ def measure_stream_hz(speed: float, seconds: float = 6.0) -> float:
     float
         實際達成的幀率（Hz）。
     """
+    from ui_bridge import stream_subject
+
+    frames = np.zeros((4096, 8), dtype=np.float64)
+
     async def run() -> float:
-        interval = (1.0 / 50.0) / speed
-        n = 0
+        engine = _CountingEngine()
+        task = asyncio.create_task(
+            stream_subject(engine, frames, 10, speed, set())
+        )
+        await asyncio.sleep(0.5)          # 讓排程進入穩定狀態
+        engine.count = 0
         start = time.perf_counter()
-        while time.perf_counter() - start < seconds:
-            n += 1
-            await asyncio.sleep(interval)
-        return n / (time.perf_counter() - start)
+        await asyncio.sleep(seconds)
+        elapsed = time.perf_counter() - start
+        counted = engine.count
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return counted / elapsed
 
     return asyncio.run(run())
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="pacing 缺陷未修：逐幀 asyncio.sleep 受 Windows 15.55ms 粒度限制，"
-           "--realtime 實測僅 31.3 Hz。修好後本測試會 XPASS，屆時請移除此 xfail。",
-)
-def test_realtime_achieves_target_sampling_rate():
-    """--realtime 模式必須達成接近 50 Hz 的實際取樣率。"""
-    hz = measure_stream_hz(speed=1.0)
-    assert hz >= MIN_REALTIME_HZ, (
-        f"實際取樣率僅 {hz:.1f} Hz（目標 50 Hz，門檻 {MIN_REALTIME_HZ} Hz）。"
-        "\n系統無法達成宣稱的取樣率，代表它也追不上真實的 50Hz 感測器，"
-        "Stage 8 的 50Hz 壓力測試無法進行。"
+@pytest.mark.parametrize("speed,target_hz", [(1.0, 50.0), (5.0, 250.0)])
+def test_stream_achieves_target_sampling_rate(speed, target_hz):
+    """串流必須達成宣稱的取樣率（Stage 8 A1 修正的回歸保護）。
+
+    修正前逐幀 `asyncio.sleep(frame_interval)` 受 Windows ProactorEventLoop
+    的 15.55 ms 計時器粒度限制，誤差逐幀累積：--realtime 實測僅 31.3 Hz
+    （62.6%）、--speed 5 僅 25.3%、--speed 20 僅 6.3%。系統比即時還慢，
+    追不上真實的 50Hz 感測器，Stage 8 的壓力測試因此無法進行。
+
+    修正後改以絕對時間軸排程，三個速率皆達成 100%。
+    """
+    hz = measure_stream_hz(speed=speed)
+    achieved = hz / target_hz * 100
+    assert achieved >= 90.0, (
+        f"--speed {speed:g} 實際取樣率 {hz:.1f} Hz，僅達目標 {target_hz:.0f} Hz 的 "
+        f"{achieved:.1f}%（門檻 90%）。\n"
+        "節奏排程可能已退回逐幀 sleep——該作法在 Windows 上會因 15.55 ms 的"
+        "計時器粒度累積延遲，使系統追不上真實感測器。"
     )
 
 

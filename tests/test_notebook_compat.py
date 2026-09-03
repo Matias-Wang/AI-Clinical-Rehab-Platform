@@ -145,10 +145,31 @@ class TestNotebookReferences:
         if not NOTEBOOK_DIR.is_dir():
             pytest.skip("development_history/ 不存在，略過。")
 
-        code = io.open(SCHEMA, encoding="utf-8").read()
-        m = re.search(r"def get_all_subjects_for_analysis\(folder_path=['\"]([^'\"]+)['\"]", code)
-        assert m, "get_all_subjects_for_analysis() 的簽章已改變，notebook 的無參數呼叫可能失效。"
-        assert (PROJECT_ROOT / m.group(1)).is_dir(), (
-            f"get_all_subjects_for_analysis() 的預設資料夾 '{m.group(1)}' 不存在，"
+        # 以 AST 取預設值，而非比對簽章字串：函式簽章可能因格式化而換行，
+        # 正規表示式會因此失效並讓測試在無人察覺下失去保護力。
+        tree = ast.parse(io.open(SCHEMA, encoding="utf-8").read())
+        target = next(
+            (n for n in tree.body
+             if isinstance(n, ast.FunctionDef)
+             and n.name == "get_all_subjects_for_analysis"),
+            None,
+        )
+        assert target is not None, "schema.py 找不到 get_all_subjects_for_analysis()。"
+
+        arg_names = [a.arg for a in target.args.args]
+        assert "folder_path" in arg_names, (
+            "get_all_subjects_for_analysis() 已無 folder_path 參數，"
+            "notebook 的無參數呼叫可能失效。"
+        )
+
+        # 預設值由後往前對齊參數列表
+        defaults = dict(zip(arg_names[len(arg_names) - len(target.args.defaults):],
+                            target.args.defaults))
+        node = defaults.get("folder_path")
+        assert isinstance(node, ast.Constant), (
+            "folder_path 已無字面預設值，notebook 的無參數呼叫會失敗。"
+        )
+        assert (PROJECT_ROOT / node.value).is_dir(), (
+            f"get_all_subjects_for_analysis() 的預設資料夾 '{node.value}' 不存在，"
             "notebook 的無參數呼叫會失敗。"
         )

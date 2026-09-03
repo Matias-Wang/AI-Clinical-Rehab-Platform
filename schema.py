@@ -3,7 +3,8 @@ import pandas as pd
 import numpy as np
 from scipy import stats
 from scipy.signal import butter, filtfilt
-from numpy.fft import rfft, rfftfreq
+from numpy.fft import rfft
+from numpy.typing import ArrayLike
 from sklearn.preprocessing import StandardScaler
 
 
@@ -81,7 +82,19 @@ ACTIVITY_LABELS = {
 # ==========================================================================
 # 計算合力向量 (Magnitude) 的邏輯
 # ==========================================================================
-def add_magnitude_feature(df):
+def add_magnitude_feature(df: pd.DataFrame) -> pd.DataFrame:
+    """在資料表第 3 欄插入合力向量 (Magnitude) 欄位。
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        前三欄須為 Chest Acc X/Y/Z 的原始資料表。
+
+    Returns
+    -------
+    pandas.DataFrame
+        插入 magnitude 欄後的資料表（就地修改並回傳同一物件）。
+    """
     x, y, z = df.iloc[:, 0], df.iloc[:, 1], df.iloc[:, 2]
     mag = np.sqrt(x**2 + y**2 + z**2)
     df.insert(3, 'magnitude', mag)
@@ -91,11 +104,33 @@ def add_magnitude_feature(df):
 # 滑動視窗實作函數
 # ==========================================================================
 def create_sliding_windows_with_indices(
-        df, 
-        feature_indices, 
-        label_index, 
-        window_size = 128, 
-        overlap = 64):
+        df: pd.DataFrame,
+        feature_indices: list[int],
+        label_index: int,
+        window_size: int = 128,
+        overlap: int = 64) -> tuple[np.ndarray, np.ndarray]:
+    """以滑動視窗切割資料表，並以多數投票決定各視窗標籤。
+
+    標籤為 0（無動作）的視窗會被丟棄。
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        待切割的資料表。
+    feature_indices : list of int
+        要取為特徵的欄位索引。
+    label_index : int
+        標籤所在的欄位索引。
+    window_size : int
+        視窗長度（時間步數）。
+    overlap : int
+        視窗起點的前進步長。
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        (X, y)，X shape 為 (n_windows, window_size, n_features)。
+    """
     X = []
     y = []
     data_values = df.values
@@ -118,7 +153,9 @@ def create_sliding_windows_with_indices(
 # ==========================================================================
 # 基本單一受試者資料讀取函數
 # ==========================================================================
-def load_mhealth_subject(subject_id, folder_path='data'):
+def load_mhealth_subject(
+    subject_id: int, folder_path: str = "data"
+) -> pd.DataFrame | None:
     """原子化讀取：負責最基礎的檔案讀取與錯誤檢查"""
     filename = f"mHealth_subject{subject_id}.log"
     file_path = os.path.join(folder_path, filename)
@@ -134,7 +171,9 @@ def load_mhealth_subject(subject_id, folder_path='data'):
 # ==========================================================================
 # 2. 單一受試者處理管線
 # ==========================================================================
-def load_and_preprocess_subject(subject_id, folder_path='data'):
+def load_and_preprocess_subject(
+    subject_id: int, folder_path: str = "data"
+) -> tuple[np.ndarray | None, np.ndarray | None]:
     """診斷專用：回傳 (X, y)，並包含物理濾鏡清洗邏輯。
     修改紀錄：
         - 2026/03/07：
@@ -160,9 +199,21 @@ def load_and_preprocess_subject(subject_id, folder_path='data'):
     df_with_feat = add_magnitude_feature(df_filtered.copy())
 
     # 2. 物理邊界清洗邏輯 (2026/03/07)
+    # 2a. 坐姿雜訊：Label 2 且合力超過重力 + 1.0
     upper_bound = PHYSICAL_CONSTANTS["GRAVITY"] + 1.0
-    noise_mask = (df_with_feat.iloc[:, -1] == 2) & (df_with_feat['magnitude'] > upper_bound)
+    noise_mask = (df_with_feat.iloc[:, -1] == 2) & (
+        df_with_feat["magnitude"] > upper_bound
+    )
     df_with_feat = df_with_feat[~noise_mask]
+
+    # 2b. 全局異常剔除（Stage 8 A2 補回）
+    # SPEC.md §2.3 與 README 均記載此規則，但 ACC_ERROR_THRESHOLD 從未被使用，
+    # 過濾器實際上並不存在——與 Fix 2／Fix 3 同一模式：文件承諾了安全網，
+    # 實作漏掉了。一般復健動作極少超過 5g，超過此值通常是感測器撞擊或電子雜訊。
+    # 現行資料集實測最大值為 36.01 m/s²，故補回後剔除 0 筆，驗收數字不受影響；
+    # 其價值在於接上真實感測器時能擋下硬體異常值。
+    error_mask = df_with_feat["magnitude"] > PHYSICAL_CONSTANTS["ACC_ERROR_THRESHOLD"]
+    df_with_feat = df_with_feat[~error_mask]
 
     # 3. --- 2026/03/08 新增：重力特徵分離 ---
     # 提取 Chest Acc X, Y, Z 計算重力分量
@@ -192,7 +243,8 @@ def load_and_preprocess_subject(subject_id, folder_path='data'):
         data_to_process, 
         # feature_indices=[0, 1, 2, 3], 
         # label_index = 4
-        feature_indices=[0, 1, 2, 3, 4, 5, 6],     # X, Y, Z, Mag, Grav_X, Grav_Y, Grav_Z
+        # X, Y, Z, Mag, Grav_X, Grav_Y, Grav_Z
+        feature_indices=[0, 1, 2, 3, 4, 5, 6],
         label_index = 7
     )
 
@@ -226,7 +278,9 @@ def load_and_preprocess_subject(subject_id, folder_path='data'):
 # ==========================================================================
 # 多位受試者處理管線
 # ==========================================================================
-def get_all_subjects_for_analysis(folder_path='data'):
+def get_all_subjects_for_analysis(
+    folder_path: str = "data"
+) -> dict[int, tuple[np.ndarray, np.ndarray]]:
     """
     診斷專用：回傳字典 {sid: (X, y)}。
     保留受試者獨立性，讓你能量化 Subject 1 vs Subject 4 的差異。
@@ -242,7 +296,7 @@ def get_all_subjects_for_analysis(folder_path='data'):
 # ==========================================================================
 # 最終整合入口
 # ==========================================================================
-def get_final_training_data(folder_path='data'):
+def get_final_training_data(folder_path: str = "data") -> tuple[np.ndarray, np.ndarray]:
     """
     任務 B：模型訓練專用。
     回傳合併後的 X_final, y_final (與你原本的 code 產出一致)。
@@ -260,7 +314,9 @@ def get_final_training_data(folder_path='data'):
 # ==========================================================================
 # 物理濾波器實作：Butterworth 低通濾波器
 # ==========================================================================
-def apply_low_pass_filter(data, cutoff=0.3, fs=50, order=2):
+def apply_low_pass_filter(
+    data: np.ndarray, cutoff: float = 0.3, fs: int = 50, order: int = 2
+) -> np.ndarray:
     """
     使用 Butterworth 低通濾波器分離重力分量
     - cutoff: 截止頻率 (Hz)，人體靜止重力特徵通常低於 0.3Hz
@@ -278,7 +334,7 @@ def apply_low_pass_filter(data, cutoff=0.3, fs=50, order=2):
 # ==========================================================================
 # 新增頻譜能量計算函式
 # ==========================================================================
-def extract_window_fft_energy(window_data):
+def extract_window_fft_energy(window_data: np.ndarray) -> float:
     """
     計算視窗內加速度量值 (Magnitude) 的頻譜能量
     目的：區分 Sitting (低能量) 與 Waist Bends (高能量)
@@ -295,7 +351,7 @@ def extract_window_fft_energy(window_data):
 # ==========================================================================
 # Stage 6：DTW 距離計算（取代歐幾里德距離）
 # ==========================================================================
-def dtw_distance(seq_a, seq_b, radius=16):
+def dtw_distance(seq_a: np.ndarray, seq_b: np.ndarray, radius: int = 16) -> float:
     """
     計算兩個一維時序訊號的 DTW 距離（Sakoe-Chiba band 限制版）。
     Local cost 採平方差，最終距離開根號，使其與歐幾里德距離同尺度；
@@ -318,7 +374,7 @@ def dtw_distance(seq_a, seq_b, radius=16):
 # ==========================================================================
 # 新增頻譜能量計算函式
 # ==========================================================================
-def align_coordinates(X_batch):
+def align_coordinates(X_batch: np.ndarray) -> np.ndarray:
     """
     將受試者的感測器座標系對齊至全局重力參考系 (Z-axis)
     X_batch shape: (N_windows, 128, 8)
@@ -377,7 +433,9 @@ def align_coordinates(X_batch):
 # ==========================================================================
 # 黃金範本擷取
 # ==========================================================================
-def extract_golden_template(X, y, target_label=7):
+def extract_golden_template(
+    X: np.ndarray, y: np.ndarray, target_label: int = 7
+) -> np.ndarray:
     """從指定受試者的 (X, y) 中擷取第一個符合 target_label 的視窗作為黃金範本。
 
     Parameters
@@ -425,12 +483,25 @@ class SensorDisconnectedError(SensorStreamError):
 
 # --- Week 4: 臨床品質閘門 (Generation 4) ---
 class ClinicalQualityGate:
-    def __init__(self, golden_template):
+    """臨床品質閘門：以 Grav_Y 變異數判定動作幅度是否足以進行 AI 推論。"""
+
+    def __init__(self, golden_template: np.ndarray) -> None:
+        """初始化品質閘門的門檻與參考範本。
+
+        Parameters
+        ----------
+        golden_template : numpy.ndarray
+            shape (128, 8) 的黃金範本（建議取自 S10）。
+        """
         self.GOLDEN_VAR_LIMIT = 0.001595  # S10 標竿
         self.MIN_SAFE_LIMIT = 0.0005     # 邊緣案例 (S7/S9) 及格線
+        # 黃金範本僅供外部診斷／比對使用，品質評分本身只看 Grav_Y 變異數，
+        # 不參照此範本（相似度比對在 RealTimeBiofeedbackEngine 中進行）。
         self.template = golden_template
         
-    def get_quality_report(self, X_window):
+    def get_quality_report(
+        self, X_window: np.ndarray
+    ) -> tuple[bool, float, str]:
         """
         針對單一或多個 128 步視窗進行品質診斷
         """
@@ -494,7 +565,7 @@ class RealTimeStreamProcessor:
         self.consecutive_dirty = 0
         self.buffer_resets = 0
 
-    def validate_frame(self, sensor_row) -> np.ndarray:
+    def validate_frame(self, sensor_row: ArrayLike) -> np.ndarray:
         """檢查單一影格的完整性，通過則回傳標準化後的 float64 陣列。
 
         Parameters
@@ -545,7 +616,9 @@ class RealTimeStreamProcessor:
         self.new_data_counter = 0
         self.buffer_resets += 1
 
-    def push_data(self, sensor_row):
+    def push_data(
+        self, sensor_row: ArrayLike
+    ) -> tuple[bool, np.ndarray | None]:
         """
         將單一時間步的感測器數據推入緩衝區
 
@@ -576,7 +649,8 @@ class RealTimeStreamProcessor:
         self.new_data_counter += 1
 
         # 達到步長且緩衝區已滿，回傳視窗數據進行分析
-        if self.new_data_counter >= self.stride and len(self.buffer) == self.window_size:
+        if (self.new_data_counter >= self.stride
+                and len(self.buffer) == self.window_size):
             self.new_data_counter = 0
             return True, np.array(self.buffer)
         return False, None
@@ -589,7 +663,8 @@ class RealTimeStreamProcessor:
         dict
             包含總影格數、髒影格數、髒數據比例、緩衝區重置次數與目前緩衝長度。
         """
-        dirty_ratio = self.dirty_frames / self.total_frames if self.total_frames else 0.0
+        dirty_ratio = (self.dirty_frames / self.total_frames
+                       if self.total_frames else 0.0)
         return {
             "total_frames": self.total_frames,
             "dirty_frames": self.dirty_frames,
@@ -600,14 +675,41 @@ class RealTimeStreamProcessor:
         }
 
 class RealTimeBiofeedbackEngine(RealTimeStreamProcessor):
-    def __init__(self, quality_gate, golden_template, model, window_size=128, stride=64, dtw_radius=16):
+    """即時生物回饋引擎：整合品質閘門、DTW 相似度與模型推論的決策中心。"""
+
+    def __init__(
+        self,
+        quality_gate: ClinicalQualityGate,
+        golden_template: np.ndarray,
+        model: object,
+        window_size: int = 128,
+        stride: int = 64,
+        dtw_radius: int = 16,
+    ) -> None:
+        """注入已建立的品質閘門、黃金範本與推論模型。
+
+        Parameters
+        ----------
+        quality_gate : ClinicalQualityGate
+            已初始化的臨床品質閘門。
+        golden_template : numpy.ndarray
+            shape (128, 8) 的黃金範本，用於相似度比對。
+        model : object
+            已載入的 Keras 模型（由呼叫端負責載入，此處不傳入路徑）。
+        window_size : int
+            視窗長度（時間步數）。
+        stride : int
+            視窗輸出步長。
+        dtw_radius : int
+            DTW 的 Sakoe-Chiba band 半徑（samples）。
+        """
         super().__init__(window_size, stride)
         self.gate = quality_gate
         self.golden_template = golden_template
         self.model = model
         self.dtw_radius = dtw_radius
 
-    def calculate_similarity(self, current_window):
+    def calculate_similarity(self, current_window: np.ndarray) -> float:
         """
         [物理特徵比對] 依照 SPEC 8.5 節實作相似度映射
         Stage 6：改用 DTW 取代歐幾里德距離，容忍動作節奏（相位）差異。
@@ -647,7 +749,20 @@ class RealTimeBiofeedbackEngine(RealTimeStreamProcessor):
             "reason": reason,
         }
 
-    def process_live_frame(self, new_frame):
+    def process_live_frame(self, new_frame: ArrayLike) -> dict | None:
+        """推入單一影格；湊滿視窗時執行完整的臨床決策流程。
+
+        Parameters
+        ----------
+        new_frame : array_like
+            單一時間步的 8 維感測器資料。
+
+        Returns
+        -------
+        dict or None
+            視窗尚未湊滿時回傳 None；否則回傳含 status、ui_color、msg、
+            score、similarity、predict_label、reason 的決策結果。
+        """
         # Stage 8：髒數據／斷訊攔截。push_data() 已在拋出例外前清空緩衝區，
         # 此處只需將其轉為前端可理解的紅燈狀態，讓長時間串流不會因單一
         # 壞封包而中斷。為避免雜訊期間洪水式推播，僅在「乾淨→髒」的狀態

@@ -47,6 +47,29 @@ def functions_of(tree: ast.Module) -> list[ast.FunctionDef]:
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
 
 
+def _catches_only(handler: ast.ExceptHandler, names: set[str]) -> bool:
+    """判斷 except 子句是否只捕捉指定的例外型別。
+
+    Parameters
+    ----------
+    handler : ast.ExceptHandler
+        要檢查的 except 子句。
+    names : set of str
+        視為「非錯誤」的例外型別名稱。
+
+    Returns
+    -------
+    bool
+        該子句捕捉的型別全部落在 names 內時回傳 True。
+    """
+    node = handler.type
+    if node is None:
+        return False
+    targets = node.elts if isinstance(node, ast.Tuple) else [node]
+    caught = {n.id for n in targets if isinstance(n, ast.Name)}
+    return bool(caught) and caught <= names
+
+
 @pytest.mark.parametrize("path", existing_sources())
 class TestTypeHintsAndDocstrings:
     """型別註解與 docstring 覆蓋率。"""
@@ -113,15 +136,38 @@ class TestEntryPointConventions:
         )
 
     def test_every_except_block_prints_error(self, path):
-        """每個 except 區塊都必須以 STEP N ERROR 格式輸出錯誤。"""
+        """每個 except 區塊都必須以 STEP N ERROR 格式輸出錯誤。
+
+        允許透過輔助函式輸出：只要該函式自身的內容符合規定格式即可。
+        把錯誤輸出抽成 `log_error()` 這類函式比在每個 except 內複製一份
+        print 更好，檢查器不應懲罰這種寫法。
+        """
         tree, text = parse(path)
         lines = text.split("\n")
+        pattern = r'print\(f"\{RED\}STEP\s*(?:\d+|\{[^}]+\})\s*ERROR'
+
+        # 先找出模組內「本身就會輸出 STEP ERROR」的輔助函式
+        error_loggers = set()
+        for fn in functions_of(tree):
+            body = "\n".join(lines[fn.lineno - 1: fn.end_lineno])
+            if re.search(pattern, body):
+                error_loggers.add(fn.name)
+
         bad = []
         for handler in [n for n in ast.walk(tree) if isinstance(n, ast.ExceptHandler)]:
+            # KeyboardInterrupt / SystemExit 屬正常控制流（使用者主動中止），
+            # 不是錯誤，不應強制以 ERROR 格式輸出。
+            if _catches_only(handler, {"KeyboardInterrupt", "SystemExit"}):
+                continue
+
             body = "\n".join(lines[handler.lineno - 1: handler.end_lineno])
-            pattern = r'print\(f"\{RED\}STEP\s*(?:\d+|\{[^}]+\})\s*ERROR'
-            if not re.search(pattern, body):
-                bad.append(f"  {path}:{handler.lineno}")
+            if re.search(pattern, body):
+                continue
+            called = {n.func.id for n in ast.walk(handler)
+                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+            if called & error_loggers:
+                continue
+            bad.append(f"  {path}:{handler.lineno}")
 
         assert not bad, (
             f"{path} 有 except 區塊未輸出錯誤（CLAUDE.md：except 要 print 每個 error）：\n"
