@@ -47,7 +47,6 @@
 ### 1. 專案背景與目標 (Project Overview)
 - 核心目標：開發一套能處理多受試者（10人）運動感測數據的輕量化分類模型，建立智慧醫療與運動科技的技術儲備。
 - 應用場景：穿戴式裝置動作辨識、長照防跌偵測。
-- 開發者背景：具備醫療專案管理 (Cathay General Hospital PM) 與 AI 產品架構 (CTBC AI Architect) 經驗，具備統計學專業基礎 。
 
 ### 2. 數據規格 (Data Specification)
 - 輸入維度 (Input Shape)：$128 \times 4$（時序長度 128，特徵維度 4：加速規三軸 + 總加速度）。

@@ -319,3 +319,7 @@ AI-Clinical-Rehab-Platform/
 - 作者：Matias Wang
 - Email：tzuanwork903@gmail.com
 - GitHub：[Matias-Wang](https://github.com/Matias-Wang/AI-Clinical-Rehab-Platform)
+
+**相關背景**：具醫療專案管理（Cathay General Hospital PM）與 AI 產品架構
+（CTBC AI Architect）經驗，並具備統計學專業基礎。本專案的臨床框架設計
+——以品質閘門優先於模型效能——即源自醫療場域的實務考量。
