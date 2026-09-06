@@ -24,7 +24,7 @@
 | `ui_bridge.py` | Stage 7 新增。WebSocket 即時資料橋接伺服器，將 `RealTimeBiofeedbackEngine` 的推論結果推播給前端 |
 | `frontend/demo.html` | Stage 7 新增。最小展示前端，連線 `ui_bridge.py` 顯示紅/黃/綠燈號與評分 |
 | `console.py` | Stage 8 新增。提供 `enable_utf8_output()`，於入口點將 stdout/stderr 設為 UTF-8，避免輸出被重導時因 cp950 崩潰 |
-| `tests/` | Stage 8 新增。73 項自動化回歸測試，釘死 Fix 2／Fix 3 等致命修正。以 `pytest` 執行，`-m "not slow"` 可略過需要 TensorFlow 的準確率基準測試 |
+| `tests/` | Stage 8 新增。118 項自動化回歸測試（五層 marker），釘死 Fix 2／Fix 3 等致命修正。以 `pytest` 執行，`-m "not slow"` 可略過需要 TensorFlow 的準確率基準測試 |
 | `models/clinical_rehab_model_v3.keras` | Stage 3 訓練之 v3.1_multi 模型。輸入維度為 $(1, 128, 8)$ |
 
 ---
@@ -228,6 +228,6 @@ Stage 8 的 A（髒數據防護）、D（緩衝區復原）、F（回歸測試�
 
 **首要任務**：執行 E 的長時間壓力測試（以 `get_health_stats()` 監控緩衝區），並重新評估 B 是否值得實作。
 
-**動手前請先執行 `pytest`**：專案現有 73 項回歸測試。若要動到推論路徑，準確率基準測試（`tests/test_model_accuracy_baseline.py`）可直接驗證行為未變。任何修改後測試必須維持全綠。
+**動手前請先執行 `python verify.py`**（commit 前跑 `--full`）：專案現有 118 項回歸測試，分五層。若要動到推論路徑，準確率基準測試（`tests/test_model_accuracy_baseline.py`）可直接驗證行為未變。任何修改後測試必須維持全綠。
 
 **完成 B/C 後**：執行 E 的長時間壓力測試（以 `get_health_stats()` 監控緩衝區），並整理交付文件。

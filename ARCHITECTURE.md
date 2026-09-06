@@ -90,7 +90,8 @@ mHealth_subjectN.log
         │
         ▼
 [Step 4] 物理邊界清洗
-        剔除：Label==2 AND Magnitude > 10.8 m/s²
+        4a. 坐姿雜訊：Label==2 AND Magnitude > 10.8 m/s²
+        4b. 全局異常：Magnitude > 50.0 m/s²（人體物理極限，約 5g）
         │
         ▼
 [Step 5] apply_low_pass_filter()
@@ -109,12 +110,63 @@ mHealth_subjectN.log
         ▼
 [Step 8] FFT 頻域特徵廣播
         對每個視窗計算 extract_window_fft_energy()
+        以「原始尺度」的 Magnitude 計算，含 log1p(x)/5.0 縮放
         廣播為 (128, 1) 後 hstack
         輸出：X shape (n, 128, 8)
         │
         ▼
-    (X, y) → 模型訓練
+[Step 9] 受試者級 Z-score（僅 Acc_X/Y/Z/Magnitude 前 4 欄）
+        以該受試者全部視窗攤平後 fit StandardScaler
+        Gravity（4-6 欄）與 FFT_Energy（第 7 欄）不參與
+        │
+        ▼
+    (X, y) → 模型訓練 / 即時推論
 ```
+
+> ⚠️ **Step 8 與 Step 9 的順序不可對調。** FFT 能量必須以原始尺度的
+> Magnitude 計算；若 Z-score 提前到 FFT 之前，整體準確率會由 92.6% 崩落至
+> 約 5-48%，且表面症狀（消失的類別重新出現）會讓人誤以為修好了。
+> 此為 Fix 3 的順序陷阱，已由 `tests/test_preprocessing_fixes.py` 以精確
+> 不變量釘死。
+
+---
+
+### 推論決策管線
+
+訓練管線產出的視窗，於推論端經由 `RealTimeBiofeedbackEngine.evaluate_window()`
+執行臨床決策：
+
+```
+(128, 8) 視窗
+        │
+        ▼
+[1] ClinicalQualityGate.get_quality_report()
+        檢查 Grav_Y 變異數 + NaN/Inf fail-safe
+        │
+        ├── var_y 非有限值 ────────► 🔴 HALT (reason=DIRTY_DATA)
+        │
+        ├── var_y < 0.0005 ────────► 🔴 HALT (reason=LOW_QUALITY)
+        │                              「動作幅度嚴重不足，AI 停止預測」
+        ▼
+[2] 模型推論 model.predict_on_batch()
+        (1, 128, 8) → 13 類機率 → argmax
+        │
+        ▼
+[3] DTW 姿態相似度 calculate_similarity()
+        比對 Grav_Y 與 S10 黃金範本
+        Score_sim = max(0, 100 - DTW距離 × 15)
+        │
+        ▼
+[4] 綜合評分與燈號
+        Final = 品質分數 × 0.4 + 相似度 × 0.6
+        sim > 35 → 🟢 GREEN，否則 🟡 YELLOW
+        │
+        ▼
+    決策結果 dict → main.py 報表 / ui_bridge WebSocket 推播
+```
+
+**設計要點**：品質閘門先於推論。動作幅度不足時系統**拒絕給分**而非給出低分，
+這是 Data-Centric 路線的核心——寧可不輸出，也不輸出基於無效資料的結果。
 
 ---
 
@@ -217,7 +269,7 @@ Input: (128, 8)
 
 ### 自動化回歸測試（Stage 8 新增）
 
-模型層之外，`tests/` 提供程式碼層級的回歸保護，共 73 項：
+模型層之外，`tests/` 提供程式碼層級的回歸保護，共 118 項，以 pytest marker 分為五層（見 `verify.py`）：
 
 | 測試模組 | 保護目標 |
 |----------|----------|
@@ -228,6 +280,11 @@ Input: (128, 8)
 | `test_dtw.py` | DTW 對稱性、非負性、**DTW ≤ 歐幾里德距離**（Stage 6 免校準的依據） |
 | `test_console_encoding.py` | cp950 崩潰情境（含對照組證明測試具鑑別力） |
 | `test_model_accuracy_baseline.py` | 對照訓練 notebook 的準確率基準（標記 `slow`） |
+| `test_acceptance_parity.py` | `main.py` 輸出與 golden 基準逐行比對（標記 `acceptance`） |
+| `test_doc_consistency.py` | **文件漂移偵測**：SPEC.md 記載的 API 與樹狀圖路徑必須真實存在 |
+| `test_conventions.py` | CLAUDE.md 規範（型別註解、docstring、行寬、STEP 輸出） |
+| `test_notebook_compat.py` | **notebook 相容性守門**：訓練 notebook 引用的 schema 符號不得消失 |
+| `test_performance_smoke.py` | 推論延遲與串流速率門檻（標記 `perf`） |
 
 **測試品質驗收**：以突變測試確認測試具鑑別力——逐一注入 4 個已修復的回歸，測試分別失敗 2／7／4／3 項。
 
@@ -245,7 +302,7 @@ AI-Clinical-Rehab-Platform/
 ├── requirements.txt                  # 依賴清單
 ├── pytest.ini                        # [Stage 8] 測試設定（testpaths、slow marker）
 │
-├── tests/                            # [Stage 8] 自動化回歸測試（73 項）
+├── tests/                            # [Stage 8] 自動化回歸測試（118 項，五層）
 │   ├── conftest.py                   # 共用 fixture 與受試者資料快取
 │   ├── test_preprocessing_fixes.py   # Fix 1/2/3 回歸
 │   ├── test_quality_gate.py          # 品質閘門 NaN 防護與門檻
