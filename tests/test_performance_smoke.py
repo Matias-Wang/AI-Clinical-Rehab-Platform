@@ -98,14 +98,29 @@ class _CountingEngine:
     因此以最輕量的替身隔離出純粹的時序行為。
     """
 
-    def __init__(self) -> None:
-        """初始化計數器。"""
-        self.count = 0
+    def __init__(self, stride: int = 64) -> None:
+        """初始化計數器與步長。
 
-    def process_live_frame(self, frame: np.ndarray) -> None:
-        """記錄收到的幀數，不做任何運算。"""
+        Parameters
+        ----------
+        stride : int
+            視窗步長，`stream_subject()` 以此換算視窗間隔。
+        """
+        self.count = 0
+        self.stride = stride
+
+    def evaluate_window(self, window: np.ndarray) -> dict:
+        """記錄評估次數並回傳最小可用的結果字典。"""
         self.count += 1
-        return None
+        return {
+            "status": "HALT",
+            "ui_color": "RED",
+            "msg": "",
+            "score": 0.0,
+            "similarity": 0,
+            "predict_label": None,
+            "reason": "LOW_QUALITY",
+        }
 
     def reset_buffer(self) -> None:
         """符合引擎介面，供例外處理路徑呼叫。"""
@@ -132,12 +147,13 @@ def measure_stream_hz(speed: float, seconds: float = 6.0) -> float:
     """
     from ui_bridge import stream_subject
 
-    frames = np.zeros((4096, 8), dtype=np.float64)
+    stride = 64
+    windows = np.zeros((512, 128, 8), dtype=np.float64)
 
     async def run() -> float:
-        engine = _CountingEngine()
+        engine = _CountingEngine(stride=stride)
         task = asyncio.create_task(
-            stream_subject(engine, frames, 10, speed, set())
+            stream_subject(engine, windows, 10, speed, set())
         )
         await asyncio.sleep(0.5)          # 讓排程進入穩定狀態
         engine.count = 0
@@ -151,7 +167,9 @@ def measure_stream_hz(speed: float, seconds: float = 6.0) -> float:
             await task
         except asyncio.CancelledError:
             pass
-        return counted / elapsed
+        # Stage 8 B1 起改為逐視窗推播，換算回等效幀率以維持門檻語意：
+        # 相鄰視窗相距 stride 幀，故有效取樣率 = 視窗速率 × stride
+        return counted / elapsed * stride
 
     return asyncio.run(run())
 

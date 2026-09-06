@@ -174,7 +174,8 @@ Input: (128, 8)
 | Stage 7 | (128, 8) | + ui_bridge.py（WebSocket）+ frontend/demo.html | 分析結果僅能終端機輸出，尚未對接前端 | 已完成 |
 | Fix 3 | (128, 8) | 補回 Acc/Mag 受試者級 Z-score 與 FFT log1p/5.0 縮放 | Train/Serving Skew：12 類中 4 類從未被預測 | 已完成 |
 | Stage 8 A/D/F | (128, 8) | + 影格驗證／緩衝區復原／回歸測試（72 項） | 髒數據可穿透品質閘門；無任何自動化測試保護 | 已完成 |
-| Stage 8 C | (128, 8) | 推論改用 `predict_on_batch()` | 單筆推論 94.91 ms 且持續累積記憶體 | **當前版本** |
+| Stage 8 C | (128, 8) | 推論改用 `predict_on_batch()` | 單筆推論 94.91 ms 且持續累積記憶體 | 已完成 |
+| 稽核 B1/B3 | (128, 8) | 逐視窗評估取代攤平串流；報表改用 L7 召回率 | 50% 視窗帶有訓練時未見的 FFT 形態 | **當前版本** |
 
 ---
 
@@ -305,6 +306,7 @@ AI-Clinical-Rehab-Platform/
 
 - **Stage 8 A/D/F — 臨床串流防護與測試基礎建設**：品質閘門補上 NaN/Inf fail-safe（原本 `NaN < 門檻` 恆為 False，髒數據可直接穿透至模型）；`RealTimeStreamProcessor` 新增影格驗證、緩衝區復原與健康度統計；建立首套自動化回歸測試（72 項），並以突變測試驗證其鑑別力。
 
+- **稽核 B1 — 串流重建缺陷修正**：`main.py` 與 `ui_bridge.py` 原以 `X.reshape(-1, 8)` 攤平已 50% 重疊的視窗作為「模擬即時串流」，使串流膨脹為真實訊號的 2.00 倍，且引擎重新切窗後有 50% 的視窗橫跨兩個原始視窗——第 8 維 FFT 能量因此出現兩個不同值，構成 train/serving skew。改為逐視窗評估（新增 `evaluate_window()` 供兩條路徑共用）。驗收基準已隨之更新。
 - **Stage 8 C — 即時推論路徑最佳化**：`process_live_frame()` 的推論由 `predict()` 改為 `predict_on_batch()`。前者為批次導向 API，每次呼叫都會建立 data adapter 與 tf.function 追蹤，用於單一視窗的高頻推論時開銷主導了執行時間（94.91 ms → 2.49 ms，端到端 256 秒 → 44 秒），且會持續累積記憶體。輸出逐位元相同。
 
 ### 近期（Stage 8 剩餘，進行中）

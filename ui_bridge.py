@@ -104,21 +104,31 @@ def build_broadcast_payload(
 
 async def stream_subject(
     engine: RealTimeBiofeedbackEngine,
-    flat_stream: np.ndarray,
+    windows: np.ndarray,
     subject_id: int,
     speed: float,
     clients: set[ServerConnection],
 ) -> None:
-    """持續模擬受試者感測器串流，並將每個視窗結果 broadcast 給所有 client。
+    """依真實時間節奏逐視窗評估並 broadcast 結果給所有 client。
 
-    串流跑到結尾後會自動從頭重播，讓展示頁面可以持續看到燈號變化。
+    重播跑到結尾後會自動從頭開始，讓展示頁面可以持續看到燈號變化。
+
+    Stage 8 B1：改為逐視窗推播，取代原本「攤平重疊視窗後逐幀 push_data」
+    的作法。原作法把已 50% 重疊的視窗攤平當成連續訊號，使引擎重新切窗後
+    有 50% 的視窗橫跨兩個原始視窗——第 8 維 FFT 能量因此出現兩個不同值，
+    而該特徵在訓練資料中永遠是整個視窗的單一常數，構成 train/serving skew。
+    FFT 為視窗級特徵且須以原始尺度的 Magnitude 計算（見 Fix 3），在已標準化
+    的逐幀串流中無法重建，故逐視窗評估是唯一能餵入正確輸入形態的作法。
+
+    時間節奏維持真實：相鄰視窗相距 stride 幀，故每個視窗間隔
+    `stride / 50 / speed` 秒（--realtime 下為 1.28 秒）。
 
     Parameters
     ----------
     engine : RealTimeBiofeedbackEngine
         已初始化的即時推論引擎。
-    flat_stream : numpy.ndarray
-        攤平後的逐幀感測器資料，shape 為 (n_frames, 8)。
+    windows : numpy.ndarray
+        預處理後的視窗集合，shape 為 (n_windows, 128, 8)。
     subject_id : int
         受試者編號，僅用於標記推播訊息。
     speed : float
@@ -127,38 +137,32 @@ async def stream_subject(
         目前已連線的 WebSocket client 集合。
     """
     loop = asyncio.get_running_loop()
-    frame_interval = (1.0 / 50.0) / speed
+    window_interval = (engine.stride / 50.0) / speed
     frame_index = 0
-    frames_elapsed = 0
+    windows_elapsed = 0
     timeline_start = loop.time()
 
     while True:
-        for frame in flat_stream:
+        for window in windows:
             try:
-                result = engine.process_live_frame(frame)
-                if result is not None:
-                    payload = build_broadcast_payload(result, subject_id, frame_index)
-                    if clients:
-                        broadcast(clients, payload)
-                    frame_index += 1
+                result = engine.evaluate_window(window)
+                payload = build_broadcast_payload(result, subject_id, frame_index)
+                if clients:
+                    broadcast(clients, payload)
+                frame_index += 1
             except Exception as e:
-                # Stage 8：非預期例外時必須丟棄整段緩衝區。
-                # 若只印錯誤就繼續，造成例外的資料已殘留在 deque 中，
-                # 後續最多 window_size 步的視窗都會沿用被污染的緩衝。
+                # 單一視窗評估失敗不應中斷整條串流，記錄後繼續下一個視窗
                 print(f"{RED}STEP 4 ERROR:{e}{RESET}")
-                engine.reset_buffer()
-                print(f"{YELLOW}STEP 4:已清空串流緩衝區，等待重新累積乾淨視窗{RESET}")
 
-            # Stage 8 (A1)：以絕對時間軸排程，取代逐幀 sleep(frame_interval)。
+            # Stage 8 (A1)：以絕對時間軸排程，取代逐次 sleep(window_interval)。
             # Windows 的 ProactorEventLoop 計時器粒度為 15.55 ms，任何小於此值
-            # 的 sleep 都會被拉長到 15.55 ms。原本逐幀 sleep 使誤差逐幀累積：
-            # --realtime 要求 20 ms/幀，實際變成 31.2 ms/幀，50 Hz 掉到 31.3 Hz，
-            # 系統比即時還慢，追不上真實感測器（Stage 8 壓力測試因此無法進行）。
+            # 的 sleep 都會被拉長到 15.55 ms，逐次 sleep 會使誤差持續累積：
+            # --realtime 原本只跑到 31.3 Hz（目標 50 Hz），系統比即時還慢。
             #
-            # 改以「每幀的目標時刻」計算延遲：超前才 sleep，落後則立即處理下一幀
-            # 進行追趕。粒度誤差因此被攤平為抖動而非累積延遲，平均速率正確。
-            frames_elapsed += 1
-            delay = timeline_start + frames_elapsed * frame_interval - loop.time()
+            # 改以「每個視窗的目標時刻」計算延遲：超前才 sleep，落後則立即
+            # 處理下一個視窗進行追趕，粒度誤差因此攤平為抖動而非累積延遲。
+            windows_elapsed += 1
+            delay = timeline_start + windows_elapsed * window_interval - loop.time()
 
             if delay > 0:
                 await asyncio.sleep(delay)
@@ -169,7 +173,9 @@ async def stream_subject(
                 if delay < -MAX_CATCHUP_SECONDS:
                     # 落後過多（系統暫停、行程被凍結等）時重設時間軸，
                     # 避免以最高速率無止境追趕一段永遠補不回來的落差。
-                    timeline_start = loop.time() - frames_elapsed * frame_interval
+                    timeline_start = (
+                        loop.time() - windows_elapsed * window_interval
+                    )
 
 
 async def handle_client(
@@ -215,7 +221,7 @@ async def main() -> None:
         X_subject, _ = load_and_preprocess_subject(args.subject, DATA_FOLDER)
         if X_subject is None:
             raise ValueError(f"找不到受試者 S{args.subject:02} 的資料")
-        flat_stream = X_subject.reshape(-1, 8)
+        # Stage 8 B1：直接使用預處理視窗，不再攤平為逐幀串流
     except Exception as e:
         print(f"{RED}STEP 2 ERROR:{e}{RESET}")
         return
@@ -235,7 +241,7 @@ async def main() -> None:
                 f"{GREEN}STEP 4:開始模擬受試者 S{args.subject:02} "
                 f"即時串流 (speed={speed}x){RESET}"
             )
-            await stream_subject(engine, flat_stream, args.subject, speed, clients)
+            await stream_subject(engine, X_subject, args.subject, speed, clients)
     except Exception as e:
         print(f"{RED}STEP 3 ERROR:{e}{RESET}")
 

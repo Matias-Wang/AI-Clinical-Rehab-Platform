@@ -80,8 +80,8 @@ def assess_subject(
     Returns
     -------
     dict or None
-        含 sid、total、pass_rate、halt、label7_hits 的統計字典；
-        找不到該受試者資料時回傳 None。
+        含 sid、total、pass_rate、halt、l7_true、l7_hit、l7_recall 的統計
+        字典；找不到該受試者資料時回傳 None。
     """
     X_test, y_test = load_and_preprocess_subject(subject_id, DATA_FOLDER)
     if X_test is None:
@@ -92,30 +92,44 @@ def assess_subject(
 
     halt_count = 0
     proceed_count = 0
-    correct_label_count = 0  # 針對 Label 7 的辨識統計
+    l7_true = 0   # 真實標籤為 7 且通過品質閘門的視窗數
+    l7_hit = 0    # 其中被 AI 正確辨識為 7 的視窗數
 
-    # 模擬連續影格流
-    flat_stream = X_test.reshape(-1, 8)
-    for i in range(len(flat_stream)):
-        result = engine.process_live_frame(flat_stream[i])
-        if result:
-            if result["status"] == "HALT":
-                halt_count += 1
-            else:
-                proceed_count += 1
-                # 統計 AI 是否正確辨識出該片段為 Label 7
-                if result["predict_label"] == 7:
-                    correct_label_count += 1
+    # Stage 8 B1：逐視窗評估，取代原本的 X.reshape(-1, 8) 攤平串流。
+    #
+    # 原作法把「已 50% 重疊」的視窗攤平當成連續訊號，造成三個問題：
+    #   1. 每個樣本重複出現兩次，串流長度膨脹為真實訊號的 2.00 倍
+    #   2. 每 128 步在時間軸倒退 64 步，接縫處出現 53 倍於正常的跳變
+    #   3. 引擎重新切窗後，50% 的視窗橫跨兩個原始視窗，使第 8 維 FFT 能量
+    #      出現兩個不同值——而該特徵在訓練資料中永遠是整個視窗的單一常數。
+    #      這是與 Fix 3 同類的 train/serving skew。
+    #
+    # FFT 為視窗級特徵且必須以原始尺度的 Magnitude 計算（見 Fix 3），
+    # 在已標準化的逐幀串流中無法重建，因此唯一正確的作法是逐視窗評估。
+    for window, true_label in zip(X_test, y_test):
+        result = engine.evaluate_window(window)
+        if result["status"] == "HALT":
+            halt_count += 1
+            continue
+
+        proceed_count += 1
+        if true_label == GOLDEN_TARGET_LABEL:
+            l7_true += 1
+            if result["predict_label"] == GOLDEN_TARGET_LABEL:
+                l7_hit += 1
 
     total_windows = halt_count + proceed_count
     pass_rate = (proceed_count / total_windows) * 100 if total_windows > 0 else 0
+    l7_recall = (l7_hit / l7_true) * 100 if l7_true > 0 else 0.0
 
     return {
         "sid": subject_id,
         "total": total_windows,
         "pass_rate": pass_rate,
         "halt": halt_count,
-        "label7_hits": correct_label_count,
+        "l7_true": l7_true,
+        "l7_hit": l7_hit,
+        "l7_recall": l7_recall,
     }
 
 
@@ -127,16 +141,22 @@ def print_report(report_summary: list[dict]) -> None:
     report_summary : list of dict
         各受試者的統計字典列表。
     """
-    print("\n" + "=" * 60)
-    print(f"{'受試者':<8} | {'總視窗數':<8} | {'品質合格率':<10} | {'AI 辨識 L7 次數':<10}")
-    print("-" * 60)
+    print("\n" + "=" * 72)
+    print(
+        f"{'受試者':<8} | {'總視窗數':<8} | {'品質合格率':<10} | "
+        f"{'L7 視窗數':<9} | {'L7 召回率':<9}"
+    )
+    print("-" * 72)
     for r in report_summary:
+        # 無 L7 視窗通過閘門時顯示「—」，避免與「全部辨識錯誤」混淆
+        recall = f"{r['l7_recall']:>7.1f}%" if r["l7_true"] > 0 else f"{'—':>8}"
         print(
             f"S{r['sid']:02}{'':<6} | {r['total']:<10} | "
-            f"{r['pass_rate']:>8.1f}%{'':<3} | {r['label7_hits']:<10}"
+            f"{r['pass_rate']:>8.1f}%{'':<3} | {r['l7_true']:<11} | {recall}"
         )
-    print("=" * 60)
+    print("=" * 72)
     print("註：S1-S4 預期合格率極低（<30%），符合臨床品質閘門攔截標準。")
+    print("註：L7 召回率 = 通過品質閘門且真實標籤為 7 的視窗中，被正確辨識的比例。")
 
 
 def run_batch_assessment() -> int:

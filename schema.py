@@ -778,9 +778,28 @@ class RealTimeBiofeedbackEngine(RealTimeStreamProcessor):
 
         if not ready: return None
 
+        return self.evaluate_window(window_data)
+
+    def evaluate_window(self, window_data: np.ndarray) -> dict:
+        """對單一完整視窗執行臨床決策流程。
+
+        由 `process_live_frame()`（串流路徑）與批量／重播路徑共用，
+        確保兩者的判定邏輯完全一致。
+
+        Parameters
+        ----------
+        window_data : numpy.ndarray
+            shape (128, 8) 的完整視窗。
+
+        Returns
+        -------
+        dict
+            含 status、ui_color、msg、score、similarity、predict_label、
+            reason 的決策結果。
+        """
         # 1. 執行 Week 4 品質檢查
         is_valid, q_score, q_msg = self.gate.get_quality_report(window_data)
-        
+
         if not is_valid:
             return {
                 "status": "HALT", 

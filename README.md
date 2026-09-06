@@ -128,7 +128,7 @@ pytest -m "not slow"
 - **即時串流處理器 (RealTimeStreamProcessor)**：`schema.py` 內建支援 50% 重疊率（Stride=64）的滑動視窗緩衝區，模擬穿戴裝置即時數據流。內建影格完整性驗證與緩衝區復原機制，攔截 NaN/Inf、維度錯誤與硬體雜訊，並在連續髒數據時判定感測器斷訊。
 - **即時生物回饋引擎 (RealTimeBiofeedbackEngine)**：整合品質閘門與 DTW 相似度評分的即時決策中心，輸出 紅/黃/綠 三色 UI 引導狀態。
 - **DTW 姿態相似度**：以 Dynamic Time Warping（Sakoe-Chiba band，radius=16）取代點對點的歐幾里德距離，容忍動作節奏差異——姿勢正確但速度略慢的患者不再被誤判為做錯。
-- **即時資料橋接 (WebSocket)**：`ui_bridge.py` 將推論結果即時 broadcast 給前端，`frontend/demo.html` 提供無框架的最小展示頁面。
+- **即時資料橋接 (WebSocket)**：`ui_bridge.py` 依真實時間節奏逐視窗推播推論結果（`--realtime` 下每 1.28 秒一個視窗），`frontend/demo.html` 提供無框架的最小展示頁面，顯示紅/黃/綠燈號與攔截原因。
 - **低延遲即時推論**：以 `predict_on_batch()` 執行單視窗推論（中位數 2.49 ms），相較批次導向的 `predict()`（94.91 ms）快約 38 倍且無記憶體累積，輸出逐位元相同。
 - **自動化回歸測試**：`tests/` 提供 73 項測試，釘死 Fix 1/2/3 等致命修正與推論路徑選擇，並以突變測試驗證測試本身的鑑別力。
 

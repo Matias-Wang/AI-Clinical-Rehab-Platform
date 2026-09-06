@@ -189,7 +189,8 @@ Input Shape: (128, 4)   ← Generation 2 之前；Generation 3 為 (128, 8)
 | 方法 | 用途 | 輸入 | 輸出 |
 |------|------|------|------|
 | `__init__(quality_gate, golden_template, model, window_size, stride, dtw_radius)` | 注入已建立的品質閘門、黃金範本與 Keras 模型（模型由呼叫端載入，非傳入路徑） | `ClinicalQualityGate`, ndarray (128, 8), Keras model, int, int, int | — |
-| `process_live_frame(new_frame)` | 逐幀推入；湊滿視窗時執行品質評估、AI 推論與相似度評分 | ndarray (8,) | dict 或 `None`（視窗未湊滿時） |
+| `process_live_frame(new_frame)` | 逐幀推入；湊滿視窗時委派給 `evaluate_window()` | ndarray (8,) | dict 或 `None`（視窗未湊滿時） |
+| `evaluate_window(window_data)` | 對單一完整視窗執行臨床決策流程（Stage 8 B1 抽出，供串流與批量／重播路徑共用） | ndarray (128, 8) | dict |
 | `calculate_similarity(current_window)` | 計算與黃金範本 Grav_Y 的姿勢相似度評分（Stage 6 起：DTW，Sakoe-Chiba band） | ndarray (128, 8) | float（0–100） |
 
 `process_live_frame()` 回傳 dict 的欄位為 `status`、`ui_color`、`msg`、`score`、`similarity`、`predict_label`、`reason`（詳見 9.5 節）。
@@ -334,7 +335,9 @@ class ClinicalQualityGate:
 
 ### 9.2 資料來源
 
-沒有真實硬體輸入，改用指定受試者（預設 S10）的 mHealth log 檔案模擬即時串流：`load_and_preprocess_subject(subject_id, "data/")` 取得的視窗攤平為逐幀資料（`X.reshape(-1, 8)`），逐幀餵入 `engine.process_live_frame()`。播放到結尾後自動從頭重播。黃金範本固定取 S10（`load_and_preprocess_subject(10, ...)`），與 `--subject` 參數無關。
+沒有真實硬體輸入，改用指定受試者（預設 S10）的 mHealth log 檔案重播：`load_and_preprocess_subject(subject_id, "data/")` 取得的視窗集合逐一餵入 `engine.evaluate_window()`，依真實時間節奏推播（相鄰視窗相距 stride 幀，故間隔為 `stride / 50 / speed` 秒，`--realtime` 下為 1.28 秒）。播放到結尾後自動從頭重播。黃金範本固定取 S10（`load_and_preprocess_subject(10, ...)`），與 `--subject` 參數無關。
+
+> **Stage 8 B1 變更**：原作法將已 50% 重疊的視窗攤平為逐幀串流（`X.reshape(-1, 8)`）再逐幀餵入 `process_live_frame()`。該作法使串流長度膨脹為真實訊號的 2.00 倍、每 128 步在時間軸倒退 64 步，且引擎重新切窗後有 50% 的視窗橫跨兩個原始視窗——第 8 維 FFT 能量因此出現兩個不同值，而該特徵在訓練資料中永遠是整個視窗的單一常數，構成 train/serving skew。FFT 為視窗級特徵且須以原始尺度的 Magnitude 計算（見 Fix 3），在已標準化的逐幀串流中無法重建，故改為逐視窗評估。
 
 ### 9.3 連線與埠號
 
